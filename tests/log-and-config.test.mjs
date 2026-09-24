@@ -9,7 +9,7 @@ import test, { mock } from "node:test";
 import { CONFIG_SPEC, DEFAULTS, DEFAULT_EFFORT, DEFAULT_MODEL, REDIRECTS, WORKERS, WORKER_SET, loadConfig } from "../scripts/lib/config.mjs";
 import { appendLog, logFile, logMaxBytes, readLogTail, rotatedLogFile, truncate } from "../scripts/lib/log.mjs";
 import { QUESTIONS, buildRequest } from "../scripts/lib/questions.mjs";
-import { JevError, KEYCHAIN_TIMEOUT_MS, readAnswers } from "../scripts/lib/typesafe.mjs";
+import { JevError, readAnswers } from "../scripts/lib/typesafe.mjs";
 import { lastWriterFamily, readLimitsState, recordWriterDispatch, recordWriterLaunch, recordWriterStop } from "../scripts/lib/context.mjs";
 import { countFindings, reportsNoWrite } from "../scripts/lib/findings.mjs";
 import { CLAUDE_FALLBACK, FIVE_HOURS_MS, SEVEN_DAYS_MS, claudeCapNotice, claudeNotice, claudeState, firstNotice, windowVerdict } from "../scripts/lib/provider-state.mjs";
@@ -84,12 +84,12 @@ test("loadConfig merges the file and the environment, and reports bad values", (
   }
 });
 
-test("the route hook's timeout leaves room for the longest classifier wait, the key lookup and two ps calls", () => {
+test("the route hook's timeout leaves room for the longest classifier wait and two ps calls", () => {
   const hooks = JSON.parse(fs.readFileSync(path.join(ROOT, "hooks", "hooks.json"), "utf8"));
   const route = hooks.hooks.PreToolUse.flatMap((entry) => entry.hooks).find((hook) => hook.args.some((arg) => arg.endsWith("route-hook.mjs")));
-  // All of these can happen in one dispatch: the key lookup, the classifier, and
-  // the writer lock's look at the runner and at Codex. Then the start of Node and the file work.
-  const needed = CONFIG_SPEC.jevTimeoutMs.max + KEYCHAIN_TIMEOUT_MS + 2 * PS_TIMEOUT_MS + 3000;
+  // All of these can happen in one dispatch: the classifier, and the writer
+  // lock's look at the runner and at Codex. Then the start of Node and the file work.
+  const needed = CONFIG_SPEC.jevTimeoutMs.max + 2 * PS_TIMEOUT_MS + 3000;
   assert.ok(route.timeout * 1000 >= needed, `the route hook's timeout (${route.timeout} s) must be at least ${needed / 1000} s`);
   // The loader must not accept a longer wait than the spec says.
   assert.equal(loadConfig({ ORCH_DATA_DIR: "/nonexistent", ORCH_JEV_TIMEOUT_MS: String(CONFIG_SPEC.jevTimeoutMs.max + 1) }).config.jevTimeoutMs, DEFAULTS.jevTimeoutMs);
@@ -597,6 +597,12 @@ test("at a high Claude usage the session start names the switch that the hook wi
     const codexOn = JSON.parse((await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { ORCH_LIMITS_FILE: limitsFile }) })).stdout);
     assert.match(codexOn.systemMessage, /Tasks with a complete brief now run on Codex/);
     assert.ok(!codexOn.systemMessage.includes("Opus"));
+
+    // With Jev off nothing moves, so the start promises no switch and says why.
+    const jevOff = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { ORCH_JEV_ENABLED: "", ORCH_LIMITS_FILE: limitsFile }) });
+    assert.ok(!jevOff.stdout.includes("systemMessage"), jevOff.stdout);
+    assert.match(jevOff.stdout, /Routing is off, because `jevEnabled` is not true/);
+    assert.ok(!jevOff.stdout.includes("now run on"), "a switch that will not happen was promised");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -1061,6 +1067,20 @@ test("the setup check reports a status line log without reset times, and names t
     fs.writeFileSync(file, JSON.stringify({ ts: now, five_hour: 12, seven_day: 34, five_hour_resets_at: now + 3600, seven_day_resets_at: now + 86400, session_id: "s" }));
     const current = await runNode("scripts/setup-check.mjs", { env });
     assert.match(current.stdout, /OK\s+Status line log: 5-hour 12% \(resets .+\), 7-day 34% \(resets .+\), \d+ s old/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("the setup check says that Jev is off by default and does not look for a key", async () => {
+  const tempDir = makeTempDir();
+  try {
+    const off = await runNode("scripts/setup-check.mjs", { env: cleanEnv(tempDir, { ORCH_CODEX_ENABLED: "", ORCH_JEV_ENABLED: "" }) });
+    assert.match(off.stdout, /OK\s+Jev: off, so the hook sends no brief to TypeSafe/);
+    assert.doesNotMatch(off.stdout, /^\S+\s+TypeSafe key:/m);
+    assert.match(off.stdout, /OK\s+Other agent types: they pass unchanged while Jev is off/);
+    const on = await runNode("scripts/setup-check.mjs", { env: cleanEnv(tempDir, { ORCH_CODEX_ENABLED: "" }) });
+    assert.match(on.stdout, /MISSING\s+TypeSafe key: not found/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

@@ -96,13 +96,15 @@ async function decide(input, toolInput, requested, config, record, providers) {
     record.brief_warnings = [routeLine.warning];
   }
 
-  const { key, source, problems } = findApiKey();
-  if (problems.length > 0) {
-    // For example "env_file:EACCES": a place with a key exists but could not be read.
-    record.key_problems = problems;
+  // Jev is opt-in. The check comes before the key lookup, so while Jev is off
+  // no key is read and no brief leaves the machine.
+  if (!config.jevEnabled) {
+    return unchanged("pass", "jev_disabled");
   }
+
+  const { key, source } = findApiKey();
   if (!key) {
-    return unchanged("pass", problems.length > 0 ? "error_key_unreadable" : "error_no_key");
+    return unchanged("pass", "error_no_key");
   }
   registerSecret(key);
 

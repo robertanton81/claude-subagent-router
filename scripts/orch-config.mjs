@@ -67,7 +67,7 @@ function writeFile(file, values) {
 // The variables that override the file for one session. Reading the settings
 // once without them shows what the file alone would give, which is the only way
 // to tell "this came from the file" from "a variable is overriding the file".
-const SESSION_VARIABLES = ["ORCH_MODE", "ORCH_COMPLETE_RULE", "ORCH_JEV_TIMEOUT_MS", "ORCH_TYPESAFE_URL", "ORCH_CODEX_ENABLED", "ORCH_ROUTE_OTHER_AGENTS"];
+const SESSION_VARIABLES = ["ORCH_MODE", "ORCH_COMPLETE_RULE", "ORCH_JEV_TIMEOUT_MS", "ORCH_TYPESAFE_URL", "ORCH_CODEX_ENABLED", "ORCH_JEV_ENABLED", "ORCH_ROUTE_OTHER_AGENTS"];
 
 function show(env) {
   const file = configPath(env);

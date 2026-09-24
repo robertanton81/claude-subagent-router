@@ -14,7 +14,7 @@ The plugin calls no Claude or OpenAI API; the work stays inside your subscriptio
 
 - Claude Code with a Claude subscription. The plugin changes which model a subagent uses; it calls no Claude API itself.
 - Node.js 20 or newer. The plugin has no npm dependencies.
-- A TypeSafe API key for Jev, the classifier that reads each brief. TypeSafe is a third-party paid API; see [typesafe.ai](https://typesafe.ai). Without a key the hook changes nothing and every call runs as written.
+- For the routing: a TypeSafe API key for Jev, the classifier that reads each brief. TypeSafe is a third-party paid API; see [typesafe.ai](https://typesafe.ai). Jev is off until you turn it on. While it is off, the hook changes no route, and the plugin's workers run on the models of their agent files.
 - Optional: the Codex CLI with a ChatGPT login, to send work to Codex. Codex jobs need macOS or Linux. On Windows the routing between Claude models works, and Codex stays off.
 
 ## Install
@@ -31,7 +31,7 @@ cd /path/to/your-project && claude plugin install orchestrator@llm-orchestrator 
 
 `--scope local` writes the switch to `.claude/settings.local.json` of that project, which git does not track. Leave `--scope` out to turn the plugin on in every project. `claude plugin marketplace update llm-orchestrator` fetches a new version.
 
-Then follow the setup below. Without a TypeSafe key the hook changes no route, and every call runs as written.
+Then follow the setup below. Until you turn Jev on, the hook sends nothing to TypeSafe and changes no route.
 
 ## Setup
 
@@ -39,13 +39,13 @@ Run the check at any time with `/orchestrator:setup` in a session. From a clone 
 
 0. **Settings.** Run `/orchestrator:configure` in a session and answer its questions, or leave everything at its default and come back to the [Configuration](#configuration) section later. Codex stays off until you turn it on.
 1. **Codex CLI (only to use Codex).** Install it, run `codex login` with your ChatGPT account, and turn Codex on with `/orchestrator:configure` or `node scripts/orch-config.mjs set codexEnabled=true`.
-2. **TypeSafe key.** The hook looks in four places, in this order: the plugin option `typesafe_api_key`, the variable `TYPESAFE_API_KEY`, the file `~/.config/typesafe/.env`, and the macOS Keychain item `orchestrator-typesafe`. The key is never logged.
+2. **Jev and its key (for the routing).** Turn Jev on with `/orchestrator:configure` or `node scripts/orch-config.mjs set jevEnabled=true`. Then set the key with `/plugin configure orchestrator@llm-orchestrator` in Claude Code: Claude Code keeps it in the Keychain (or in `~/.claude/.credentials.json`) and passes it to the hook. For scripts and CI, the variable `TYPESAFE_API_KEY` works too. The plugin reads no other place: no key file in your home folder, and never a `.env` in a project, because a cloned repository could ship one and receive your briefs in its own TypeSafe account. The key is never logged.
 3. **Status line log (optional).** The limit rule and the measurement need the two rate limit percentages, their reset times and the session id. Only the status line receives them. Paste the lines from [scripts/statusline-snippet.sh](scripts/statusline-snippet.sh) into your status line script, after the place where it reads `rate_limits`. The block reads the variables `RATE_5H`, `RATE_7D`, `RATE_5H_RESET`, `RATE_7D_RESET` and `SESSION_ID`; set the ones your script has, and the others are written as null. Without this file the limit rule is off, and everything else works. `node scripts/setup-check.mjs` says when the file is there but comes from an older snippet without the reset times.
 4. **Permission for the Codex workers (optional).** The Codex workers run one Bash command. To avoid a prompt each time, allow it in your settings: `Bash(node */scripts/orch-codex.mjs *)`.
 
 ## What leaves your machine
 
-- **To TypeSafe:** the brief (the prompt) of each `Agent` call that the hook routes, and nothing else. A brief can hold code and project rules. Set `"routeOtherAgents": false` to keep the briefs of agent types other than the plugin's own workers on your machine, or set `"mode": "off"` to send none.
+- **To TypeSafe, only while Jev is on:** the brief (the prompt) of each `Agent` call that the hook routes, and nothing else. A brief can hold code and project rules. Set `"routeOtherAgents": false` to keep the briefs of agent types other than the plugin's own workers on your machine, or set `"mode": "off"` to send none.
 - **To OpenAI, only while Codex is on:** the brief of each task that runs on Codex, plus your `~/.claude/CLAUDE.md` and the project's `CLAUDE.md` files for an implement task. A project `CLAUDE.md` that is a link to a file outside the project is not sent.
 - **Nothing else.** The dispatch log, the Codex jobs and the settings stay in `~/.claude/orchestrator/`, readable only by your user. The TypeSafe key is never written to a log.
 
@@ -89,6 +89,16 @@ The hook leaves a call alone in these cases:
 - `routeOtherAgents` is `false`. `ORCH_ROUTE_OTHER_AGENTS=0` does the same for one session.
 
 The briefs of these calls go to TypeSafe, like the briefs for our workers. A project brief can hold code and project rules. With `"routeOtherAgents": false`, such a brief stays on your machine.
+
+### Jev is opt-in
+
+Jev is off until you turn it on, like Codex. While it is off:
+
+- The hook sends no brief to TypeSafe and does not look for a key.
+- It changes no model. The orchestrator can still pick the plugin's workers, and each runs on the model of its agent file: `searcher` on Haiku, `implementer` on Sonnet, and so on.
+- The rest still works: the Codex workers and their transport, the move of a Codex task to Claude while Codex has no room, the writer lock for the plugin's own workers, and the log.
+
+To turn Jev on for all sessions, put `"jevEnabled": true` in `~/.claude/orchestrator/config.json`. For one session, start Claude Code with `ORCH_JEV_ENABLED=1`; `ORCH_JEV_ENABLED=0` turns it off for one session. A key alone does not turn Jev on.
 
 ### Codex is opt-in
 
@@ -236,6 +246,7 @@ All settings live in one file, `~/.claude/orchestrator/config.json`. It is optio
 
 | Key | Default | Meaning |
 | :-- | :-- | :-- |
+| `jevEnabled` | `false` | Let the hook send briefs to Jev. The routing needs it. See "Jev is opt-in". |
 | `jevModel` | `jev-latest` | The classifier version. Pin an exact version while measuring, so the routing cannot change under you. |
 | `jevUrl` | the TypeSafe endpoint | Where the classifier request goes. |
 | `jevTimeoutMs` | `5000` | How long to wait for an answer, from 100 to 8000. On a timeout the call runs as written. |
@@ -252,11 +263,11 @@ These variables override the file for a single session, for example `ORCH_MODE=s
 | :-- | :-- |
 | `ORCH_MODE` | The mode: `enforce`, `shadow` or `off`. |
 | `ORCH_CODEX_ENABLED` | `1` or `0`. Turns Codex on or off, whatever the file says. |
+| `ORCH_JEV_ENABLED` | `1` or `0`. Turns Jev on or off, whatever the file says. |
 | `ORCH_ROUTE_OTHER_AGENTS` | `1` or `0`. Whether the hook sets the model of other agent types. |
 | `ORCH_COMPLETE_RULE` | `shadow`, `enforce` or `off` for the completeness rule. |
 | `ORCH_JEV_TIMEOUT_MS` | The classifier timeout, in milliseconds. |
 | `ORCH_TYPESAFE_URL` | Another classifier endpoint. |
-| `ORCH_TYPESAFE_ENV_FILE` | Another file to read the key from, instead of `~/.config/typesafe/.env`. |
 | `ORCH_DATA_DIR` | Another folder for the log, the configuration and the usage samples. |
 | `ORCH_CODEX_WAIT_SECONDS` | How long a Codex worker waits for its job before reporting that it still runs, from 0 to 570. |
 
@@ -317,7 +328,7 @@ Grading reads the saved records only, so a changed grader or a changed expectati
 node scripts/orch-eval.mjs <task set.json> --regrade ~/.claude/orchestrator/eval/<time>/
 ```
 
-The arms: `off` is Claude Code without the plugin; `sonnet` is without the plugin with every subagent forced to Sonnet, the baseline to beat; `shadow` loads the plugin in shadow mode, so its workers and skills exist and the hook changes nothing; `jev` loads the plugin in enforce mode. Two more arms run only when `--arms` names them: `low` and `medium` run without the plugin, with the whole session at that effort (effort is how much the model thinks before it answers). They are the single-model baselines: Anthropic measured that one model at a lower effort often costs less than a setup with several models. The shell's `CLAUDE_CODE_EFFORT_LEVEL` and `CLAUDE_EFFORT` never reach an arm, so each arm runs at the effort it names, or at the model's default. Every run counts against the Claude plan, so the command prints the plan and the most it can spend before it starts, and `--dry-run` stops there. Each run gets its own data folder, so the real store stays clean, and the run has no usage sample, so the limit rule and the pace rule stay off. `--config <file>` gives the plugin arms a copy of a config file; without it the defaults apply, with Codex off.
+The arms: `off` is Claude Code without the plugin; `sonnet` is without the plugin with every subagent forced to Sonnet, the baseline to beat; `shadow` loads the plugin in shadow mode, so its workers and skills exist and the hook changes nothing; `jev` loads the plugin in enforce mode. Two more arms run only when `--arms` names them: `low` and `medium` run without the plugin, with the whole session at that effort (effort is how much the model thinks before it answers). They are the single-model baselines: Anthropic measured that one model at a lower effort often costs less than a setup with several models. The shell's `CLAUDE_CODE_EFFORT_LEVEL` and `CLAUDE_EFFORT` never reach an arm, so each arm runs at the effort it names, or at the model's default. Every run counts against the Claude plan, so the command prints the plan and the most it can spend before it starts, and `--dry-run` stops there. Each run gets its own data folder, so the real store stays clean, and the run has no usage sample, so the limit rule and the pace rule stay off. `--config <file>` gives the plugin arms a copy of a config file; without it the defaults apply, with Codex off. The `shadow` and `jev` arms turn Jev on for themselves, and they read the key from `TYPESAFE_API_KEY` in the shell that starts the runner.
 
 At the end the command applies the pass rule per task: the `jev` arm must cost less than the `sonnet` baseline at the same pass rate or better, and every route it took must be the expected one. The verdict is `NOT DECIDED` instead of a number when fewer than three scored runs per arm exist, when the two arms wrote very different amounts into the prompt cache (a factor above two), when no grader ran, or when the gap between the two arms is narrower than the uncertainty of that gap (twice its standard error). That last guard eases as runs are added, so paying for more runs buys a sharper answer. A wrong answer or a wrong route still fails at once, because those are not matters of degree. That is deliberate: a cost difference under those conditions is noise, not a result.
 

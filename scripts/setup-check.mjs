@@ -77,11 +77,11 @@ for (const name of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {
   }
 }
 
-const { key, source, problems } = findApiKey();
-if (!key && problems.length > 0) {
-  row("MISSING", "TypeSafe key", `a place for the key exists but could not be read: ${problems.join(", ")}`);
+const { key, source } = config.jevEnabled ? findApiKey() : { key: null, source: null };
+if (!config.jevEnabled) {
+  row("OK", "Jev", 'off, so the hook sends no brief to TypeSafe and changes no route. The workers keep the models of their agent files. To route with Jev, set "jevEnabled": true in config.json and add a TypeSafe key');
 } else if (!key) {
-  row("MISSING", "TypeSafe key", "not found in the plugin option, TYPESAFE_API_KEY, ~/.config/typesafe/.env or the Keychain");
+  row("MISSING", "TypeSafe key", "not found in the plugin option or in TYPESAFE_API_KEY. Set it with /plugin configure orchestrator@llm-orchestrator in Claude Code");
 } else {
   row("OK", "TypeSafe key", `found (source: ${source})`);
   if (live) {
@@ -135,9 +135,11 @@ row(
 row(
   "OK",
   "Other agent types",
-  config.routeOtherAgents
-    ? `the hook can set their model, so their briefs go to TypeSafe too. Agent types it leaves alone: ${[...FIXED_MODEL_AGENTS, ...config.keepModelAgents].join(", ")}`
-    : "they pass unchanged, because routeOtherAgents is false"
+  !config.jevEnabled
+    ? "they pass unchanged while Jev is off"
+    : config.routeOtherAgents
+      ? `the hook can set their model, so their briefs go to TypeSafe too. Agent types it leaves alone: ${[...FIXED_MODEL_AGENTS, ...config.keepModelAgents].join(", ")}`
+      : "they pass unchanged, because routeOtherAgents is false"
 );
 for (const warning of warnings) {
   row("WARN", "Config", warning);

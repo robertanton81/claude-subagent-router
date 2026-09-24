@@ -19,20 +19,21 @@ If the user named a change in their message, for example "turn Codex off", make 
 
 ## The interview
 
-Ask **one question at a time** and wait for the answer before the next one. Skip any question the user has already answered. Five questions cover what matters; the rest of the settings are fine at their defaults.
+Ask **one question at a time** and wait for the answer before the next one. Skip any question the user has already answered. Six questions cover what matters; the rest of the settings are fine at their defaults.
 
-1. **Codex.** Does the user want the plugin to use the Codex CLI as well as Claude? It is off until they say yes, and it needs the Codex CLI installed and logged in. If they say no, skip questions about credits.
-2. **Credits**, only if Codex is on. When the weekly Codex allowance is used up, Codex keeps working and charges bought credits. The plugin refuses that by default. Ask whether a job may spend credits. Say plainly that this is real money, unlike the two subscriptions.
-3. **Mode.** `enforce` lets the hook change a route. `shadow` asks the classifier and writes down what it would have done, changing nothing. Recommend `shadow` for the first day to anyone who wants to see the decisions before trusting them, and `enforce` otherwise.
-4. **Agents that must keep their model.** Some agents are deliberately on a small model, for example a narrow yes-or-no check. The classifier sees only the brief, never the agent file, so it would move such an agent to a larger model. Ask whether the user has any, and take exact agent type names.
-5. **Briefs in the log.** The log keeps the text of briefs so the routing can be judged later. Briefs can hold code and project rules. Ask whether that is acceptable. If it is not, set `promptLogChars` to 0, which keeps the routing facts and drops the text.
+1. **Jev.** The routing needs Jev, a classifier on TypeSafe's paid API (about $0.0001 per call). While it is on, the brief of each routed subagent call goes to TypeSafe, and briefs can hold code. It is off until the user says yes; then set `jevEnabled=true`. If they say no, the plugin's workers still run on the models of their agent files, and the question about agents that must keep their model does not matter.
+2. **Codex.** Does the user want the plugin to use the Codex CLI as well as Claude? It is off until they say yes, and it needs the Codex CLI installed and logged in. If they say no, skip questions about credits.
+3. **Credits**, only if Codex is on. When the weekly Codex allowance is used up, Codex keeps working and charges bought credits. The plugin refuses that by default. Ask whether a job may spend credits. Say plainly that this is real money, unlike the two subscriptions.
+4. **Mode.** `enforce` lets the hook change a route. `shadow` asks the classifier and writes down what it would have done, changing nothing. Recommend `shadow` for the first day to anyone who wants to see the decisions before trusting them, and `enforce` otherwise.
+5. **Agents that must keep their model.** Some agents are deliberately on a small model, for example a narrow yes-or-no check. The classifier sees only the brief, never the agent file, so it would move such an agent to a larger model. Ask whether the user has any, and take exact agent type names.
+6. **Briefs in the log.** The log keeps the text of briefs so the routing can be judged later. Briefs can hold code and project rules. Ask whether that is acceptable. If it is not, set `promptLogChars` to 0, which keeps the routing facts and drops the text.
 
 ## Write the answers
 
 Write everything in one command, so either all of it lands or none of it does:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/orch-config.mjs" set codexEnabled=true mode=shadow
+node "${CLAUDE_PLUGIN_ROOT}/scripts/orch-config.mjs" set jevEnabled=true codexEnabled=true mode=shadow
 ```
 
 A list is one comma-separated value: `keepModelAgents=spec-compliance-reviewer,plan-reviewer`. An empty value clears the list. To put a setting back to its built-in value, use `unset`:
@@ -54,4 +55,4 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/setup-check.mjs"
 
 ## The classifier key is not a setting
 
-The key does not belong in this file, and it must never be typed into the conversation: anything in a transcript has to be treated as exposed. If the setup check reports a missing key, tell the user to put it in `~/.config/typesafe/.env` themselves, in the form `TYPESAFE_API_KEY=<their key>`, and then run the check again. Do not ask them to paste it, and do not write it anywhere yourself.
+The key does not belong in this file, and it must never be typed into the conversation: anything in a transcript has to be treated as exposed. If Jev is on and the setup check reports a missing key, tell the user to run `/plugin configure orchestrator@llm-orchestrator` themselves and enter the key there. Claude Code keeps it in the Keychain or its credentials file. Then run the check again. Do not ask them to paste it, do not write it anywhere yourself, and never suggest a `.env` file in the project.

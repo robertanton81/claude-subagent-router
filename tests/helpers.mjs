@@ -12,16 +12,18 @@ export function makeTempDir(prefix = "orch-test-") {
 }
 
 // A clean environment for child processes. HOME points at a temp folder, so a
-// test can never read the real key file, the real Keychain or the real log.
+// test can never read the real log or the real settings.
 export function cleanEnv(tempDir, extra = {}) {
   return {
     PATH: process.env.PATH,
     HOME: tempDir,
     ORCH_DATA_DIR: path.join(tempDir, "data"),
-    ORCH_DISABLE_KEYCHAIN: "1",
     // Codex is off by default. Most tests are about Codex, so they turn it on.
     // A test of the default passes ORCH_CODEX_ENABLED: "" in `extra`.
     ORCH_CODEX_ENABLED: "1",
+    // Jev is off by default too. Most tests are about routing, so they turn it on.
+    // A test of the default passes ORCH_JEV_ENABLED: "" in `extra`.
+    ORCH_JEV_ENABLED: "1",
     ...extra
   };
 }

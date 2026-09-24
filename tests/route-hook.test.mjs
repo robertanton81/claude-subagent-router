@@ -198,14 +198,22 @@ test("a missing key leaves the call unchanged", async () => {
   });
 });
 
-test("the key is read from the env file when no variable holds it", async () => {
+test("the plugin option comes before the variable, and no key file is read", async () => {
   await withJev({ body: jevBody({ kind: "search", writes: 0.03 }) }, async ({ jev, tempDir, env }) => {
-    const envFile = path.join(tempDir, "typesafe.env");
-    fs.writeFileSync(envFile, '# a comment\nTYPESAFE_API_KEY="file-key-not-a-secret"\n');
+    await runNode(HOOK, { stdin: agentCall(), env: { ...env, CLAUDE_PLUGIN_OPTION_TYPESAFE_API_KEY: "option-key-not-a-secret" } });
+    assert.equal(jev.state.requests[0].headers.authorization, "Bearer option-key-not-a-secret");
+    assert.equal(readLog(tempDir)[0].jev.key_source, "plugin_option");
+
+    // The old global file and a project .env are not places for the key.
     const { TYPESAFE_API_KEY: _removed, ...withoutKey } = env;
-    await runNode(HOOK, { stdin: agentCall(), env: { ...withoutKey, ORCH_TYPESAFE_ENV_FILE: envFile } });
-    assert.equal(jev.state.requests[0].headers.authorization, "Bearer file-key-not-a-secret");
-    assert.equal(readLog(tempDir)[0].jev.key_source, "env_file");
+    const project = path.join(tempDir, "project");
+    fs.mkdirSync(path.join(tempDir, ".config", "typesafe"), { recursive: true });
+    fs.mkdirSync(project);
+    fs.writeFileSync(path.join(tempDir, ".config", "typesafe", ".env"), "TYPESAFE_API_KEY=home-key-not-a-secret\n");
+    fs.writeFileSync(path.join(project, ".env"), "TYPESAFE_API_KEY=project-key-not-a-secret\n");
+    await runNode(HOOK, { stdin: agentCall({ tool_use_id: "toolu_2", cwd: project }), env: withoutKey, cwd: project });
+    assert.equal(jev.state.requests.length, 1, "no request may use a key read from a file");
+    assert.equal(readLog(tempDir).at(-1).reason, "error_no_key");
   });
 });
 
@@ -417,6 +425,34 @@ test("on Windows codex-rescue passes unchanged, as with Codex off", async () => 
   });
 });
 
+test("with Jev off by default, no brief goes to TypeSafe, even when a key exists", async () => {
+  await withJev({ body: jevBody({ kind: "search" }) }, async ({ jev, tempDir, env }) => {
+    // A key in the environment and in the plugin option, as on a machine that has one.
+    const offEnv = { ...env, ORCH_JEV_ENABLED: "", CLAUDE_PLUGIN_OPTION_TYPESAFE_API_KEY: "option-key-not-a-secret" };
+    const result = await runNode(HOOK, { stdin: agentCall(), env: offEnv });
+    assert.deepEqual([result.code, result.stdout], [0, ""]);
+    assert.equal(jev.state.requests.length, 0, "a brief reached TypeSafe");
+    const [record] = readLog(tempDir);
+    assert.deepEqual([record.action, record.reason], ["pass", "jev_disabled"]);
+
+    // Turned on for one session, the same call is routed.
+    const on = await runNode(HOOK, { stdin: agentCall({ tool_use_id: "toolu_2" }), env: { ...env, ORCH_JEV_ENABLED: "1" } });
+    assert.equal(on.code, 0);
+    assert.equal(jev.state.requests.length, 1, "with Jev on, the brief goes to TypeSafe");
+    assert.notEqual(readLog(tempDir).at(-1).reason, "jev_disabled");
+  });
+});
+
+test("with Jev off, a direct call to a Codex worker still gets a request id", async () => {
+  await withJev({ body: jevBody() }, async ({ jev, env }) => {
+    const call = JSON.parse(agentCall());
+    call.tool_input.subagent_type = "orchestrator:codex-implementer";
+    const result = await runNode(HOOK, { stdin: JSON.stringify(call), env: { ...env, ORCH_JEV_ENABLED: "" } });
+    assert.match(JSON.parse(result.stdout).hookSpecificOutput.updatedInput.prompt, /^codex-request: req-[0-9a-f]{12}\n/);
+    assert.equal(jev.state.requests.length, 0);
+  });
+});
+
 test("a review after a Codex change goes to the Claude reviewer", async () => {
   await withJev({ body: jevBody({ kind: "implement", difficulty: 2.4 }) }, async ({ jev, tempDir, env }) => {
     // First dispatch: a hard task that the table sends to Codex.
@@ -587,19 +623,6 @@ test("a writer or a reviewer is denied while a Codex job still changes files in 
     await runNode("scripts/orch-codex.mjs", { args: ["cancel", jobId], env: codexEnv, cwd: project });
     const afterCancel = await runNode(HOOK, { stdin: agentCall({ cwd: project }), env });
     assert.equal(afterCancel.stdout, "", "the folder is free after the cancel");
-  });
-});
-
-test("a key file that cannot be read is reported as unreadable, not as missing", async () => {
-  await withJev({ body: jevBody() }, async ({ tempDir, env }) => {
-    const envFile = path.join(tempDir, "typesafe.env");
-    fs.writeFileSync(envFile, "TYPESAFE_API_KEY=file-key-not-a-secret\n", { mode: 0o000 });
-    const { TYPESAFE_API_KEY: _removed, ...withoutKey } = env;
-    const result = await runNode(HOOK, { stdin: agentCall(), env: { ...withoutKey, ORCH_TYPESAFE_ENV_FILE: envFile } });
-    fs.chmodSync(envFile, 0o600);
-    assert.equal(result.stdout, "");
-    const [record] = readLog(tempDir);
-    assert.deepEqual([record.reason, record.key_problems], ["error_key_unreadable", ["env_file:EACCES"]]);
   });
 });
 

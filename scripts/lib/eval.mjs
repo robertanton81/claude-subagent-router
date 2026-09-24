@@ -29,8 +29,8 @@ export const ARMS = {
     env: { CLAUDE_CODE_SUBAGENT_MODEL: "sonnet", CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1" },
     note: "no plugin, every subagent on Sonnet: the baseline to beat"
   },
-  shadow: { plugin: true, env: { ORCH_MODE: "shadow" }, note: "the plugin in shadow mode: workers and skills, no routing" },
-  jev: { plugin: true, env: { ORCH_MODE: "enforce" }, note: "the plugin in enforce mode: Jev routing in force" },
+  shadow: { plugin: true, env: { ORCH_MODE: "shadow", ORCH_JEV_ENABLED: "1" }, note: "the plugin in shadow mode: workers and skills, no routing" },
+  jev: { plugin: true, env: { ORCH_MODE: "enforce", ORCH_JEV_ENABLED: "1" }, note: "the plugin in enforce mode: Jev routing in force" },
   low: { plugin: false, env: {}, args: ["--effort", "low"], note: "no plugin, the whole session at effort low: a single-model baseline" },
   medium: { plugin: false, env: {}, args: ["--effort", "medium"], note: "no plugin, the whole session at effort medium: a single-model baseline" }
 };
@@ -52,6 +52,7 @@ const DEFAULTS = { model: "sonnet", budgetUsd: 1, timeoutS: 600, allowedTools: [
 // not documented, so it is removed as well.
 const ARM_SWITCHES = [
   "ORCH_MODE",
+  "ORCH_JEV_ENABLED",
   "ORCH_DATA_DIR",
   "ORCH_LIMITS_FILE",
   "CLAUDE_CODE_SUBAGENT_MODEL",

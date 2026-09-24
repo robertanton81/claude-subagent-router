@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0
+
+Changes that need an action after the update:
+
+- **Jev is opt-in.** A new setting `jevEnabled`, off by default. While it is off, the hook sends no brief to TypeSafe and changes no route. To keep routing, run `node scripts/orch-config.mjs set jevEnabled=true` or `/orchestrator:configure`.
+- **The key comes only from the plugin option or `TYPESAFE_API_KEY`.** The file `~/.config/typesafe/.env` and the Keychain item `orchestrator-typesafe` are no longer read. Move the key with `/plugin configure orchestrator@llm-orchestrator`. The variable `ORCH_TYPESAFE_ENV_FILE` is gone.
+
 ## 0.1.1
 
 - README: a "Why" section, an "Install" section before the setup, and a correct statement of the one paid API (TypeSafe).

@@ -102,6 +102,10 @@ export const DEFAULTS = Object.freeze({
   completeRule: "shadow",
   completeGate: 0.6,
   limitsMaxAgeMs: 10 * 60 * 1000,
+  // The classifier is opt-in, like Codex. While this is false, the hook sends no
+  // brief to TypeSafe and does not even look for a key, so a key that exists on
+  // this machine for another purpose is never used without a yes.
+  jevEnabled: false,
   jevTimeoutMs: 5000,
   jevModel: "jev-latest",
   jevUrl: "https://api.typesafe.ai/v1/systemone",
@@ -245,6 +249,7 @@ export const CONFIG_SPEC = Object.freeze({
   pacing: { kind: "flag", about: "also count a window as full when the usage so far is on pace to reach 100 percent before the reset" },
   paceAfter: { kind: "number", min: 0, max: 1, about: "how much of a window must pass before the pace rule counts" },
   limitsMaxAgeMs: { kind: "number", min: 0, max: 24 * 3600 * 1000, about: "how long a usage sample stays usable, in milliseconds" },
+  jevEnabled: { kind: "flag", about: "let the hook send briefs to the TypeSafe classifier Jev, which the routing needs" },
   jevTimeoutMs: { kind: "number", min: 100, max: 8000, about: "how long to wait for the classifier, in milliseconds" },
   jevModel: { kind: "text", about: "the classifier version; pin an exact version while measuring" },
   jevUrl: { kind: "text", about: "where the classifier request goes" },
@@ -344,6 +349,7 @@ export function loadConfig(env = process.env) {
     pacing: flag("pacing", merged.pacing, DEFAULTS.pacing, warnings),
     paceAfter: numberInRange("paceAfter", merged.paceAfter, DEFAULTS.paceAfter, 0, 1, warnings),
     limitsMaxAgeMs: numberInRange("limitsMaxAgeMs", merged.limitsMaxAgeMs, DEFAULTS.limitsMaxAgeMs, 0, 24 * 3600 * 1000, warnings),
+    jevEnabled: envFlag("ORCH_JEV_ENABLED", env.ORCH_JEV_ENABLED, flag("jevEnabled", merged.jevEnabled, false, warnings), warnings),
     jevTimeoutMs: numberInRange("jevTimeoutMs", env.ORCH_JEV_TIMEOUT_MS ?? merged.jevTimeoutMs, DEFAULTS.jevTimeoutMs, 100, 8000, warnings),
     jevModel: text("jevModel", merged.jevModel, DEFAULTS.jevModel, warnings),
     jevUrl: env.ORCH_TYPESAFE_URL || text("jevUrl", merged.jevUrl, DEFAULTS.jevUrl, warnings),

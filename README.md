@@ -39,7 +39,7 @@ Run the check at any time with `/orchestrator:setup` in a session. From a clone 
 
 0. **Settings.** Run `/orchestrator:configure` in a session and answer its questions, or leave everything at its default and come back to the [Configuration](#configuration) section later. Codex stays off until you turn it on.
 1. **Codex CLI (only to use Codex).** Install it, run `codex login` with your ChatGPT account, and turn Codex on with `/orchestrator:configure` or `node scripts/orch-config.mjs set codexEnabled=true`.
-2. **Jev and its key (for the routing).** Follow the four steps in [TypeSafe and Jev](#typesafe-and-jev): create a key, enter it with `/plugin configure orchestrator@llm-orchestrator`, set `jevEnabled` to true, and run the check.
+2. **Jev and its key (for the routing).** Follow the four steps in [TypeSafe and Jev](#typesafe-and-jev): create a key, store it in the plugin option, set `jevEnabled` to true, and check it.
 3. **Status line log (optional).** The limit rule and the measurement need the two rate limit percentages, their reset times and the session id. Only the status line receives them. Paste the lines from [scripts/statusline-snippet.sh](scripts/statusline-snippet.sh) into your status line script, after the place where it reads `rate_limits`. The block reads the variables `RATE_5H`, `RATE_7D`, `RATE_5H_RESET`, `RATE_7D_RESET` and `SESSION_ID`; set the ones your script has, and the others are written as null. Without this file the limit rule is off, and everything else works. `node scripts/setup-check.mjs` says when the file is there but comes from an older snippet without the reset times.
 4. **Permission for the Codex workers (optional).** The Codex workers run one Bash command. To avoid a prompt each time, allow it in your settings: `Bash(node */scripts/orch-codex.mjs *)`.
 
@@ -65,7 +65,13 @@ Run the check at any time with `/orchestrator:setup` in a session. From a clone 
 **Turn it on:**
 
 1. Create a key in the TypeSafe console: https://console.typesafe.ai/keys.
-2. Run `/plugin configure orchestrator@llm-orchestrator` in Claude Code and enter the key. Claude Code keeps it in the macOS Keychain, or in `~/.claude/.credentials.json` on other systems, and passes it only to this plugin's hooks. For scripts, CI and the evaluation runner, the variable `TYPESAFE_API_KEY` works too. No other place is read: no key file in your home folder, and never a `.env` in a project, because a cloned repository could ship its own key and receive your briefs in its own TypeSafe account.
+2. Store the key in the plugin option. Copy the key, then run this in a terminal. Add the `--scope` of your install, for example `--scope local` in the project folder:
+
+   ```bash
+   k=$(pbpaste) && claude plugin install orchestrator@llm-orchestrator --config "typesafe_api_key=$k"; unset k; pbcopy </dev/null
+   ```
+
+   `pbpaste` reads the key from the clipboard, so it is never typed, printed or kept in the shell history, and `pbcopy </dev/null` clears the clipboard. On Linux, use `xclip -o -selection clipboard` or `wl-paste` instead of `pbpaste`. The command also works when the plugin is already installed: it keeps the install and sets the option. Claude Code keeps a sensitive option in the macOS Keychain, or in `~/.claude/.credentials.json` on other systems, and passes it only to this plugin's hooks. The Claude Code docs also describe a prompt for the option when the plugin is enabled. For scripts, CI and the evaluation runner, the variable `TYPESAFE_API_KEY` works too. No other place is read: no key file in your home folder, and never a `.env` in a project, because a cloned repository could ship its own key and receive your briefs in its own TypeSafe account.
 3. Set `"jevEnabled": true` with `/orchestrator:configure` or `node scripts/orch-config.mjs set jevEnabled=true`. For one session, `ORCH_JEV_ENABLED=1` or `0` overrides the file. A key alone does not turn Jev on.
 4. Start a new session and let it delegate one task, then run `/orchestrator:setup`. Claude Code passes the plugin option only to hooks, so the check cannot see the key itself; its row "TypeSafe key" reports where the hook found the key on its last routed call.
 

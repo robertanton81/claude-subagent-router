@@ -8,13 +8,13 @@ A Claude Code session hands work to subagents: searches, edits, reviews, debuggi
 
 The plugin reads each task before it starts and picks a model that fits it: Haiku for a search, Sonnet for most edits and reviews, Opus for hard work. If you turn Codex on, the plugin moves tasks to Codex when your Claude usage gets close to its limit, so your ChatGPT subscription takes part of the work. Reviews then cross the two model families: Codex reviews what Claude wrote, and Claude reviews what Codex wrote.
 
-The plugin calls no Claude or OpenAI API; the work stays inside your subscriptions. The one paid API is TypeSafe's classifier Jev, which reads each task, at about $0.0001 per call.
+The plugin calls no Claude or OpenAI API; the work stays inside your subscriptions. The one paid API is TypeSafe's classifier Jev, which reads each task, at about $0.00005 per call. It is off until you turn it on; see [TypeSafe and Jev](#typesafe-and-jev).
 
 ## Requirements
 
 - Claude Code with a Claude subscription. The plugin changes which model a subagent uses; it calls no Claude API itself.
 - Node.js 20 or newer. The plugin has no npm dependencies.
-- For the routing: a TypeSafe API key for Jev, the classifier that reads each brief. TypeSafe is a third-party paid API; see [typesafe.ai](https://typesafe.ai). Jev is off until you turn it on. While it is off, the hook changes no route, and the plugin's workers run on the models of their agent files.
+- For the routing: a TypeSafe API key for Jev, the classifier that reads each brief. Jev is off until you turn it on; see [TypeSafe and Jev](#typesafe-and-jev).
 - Optional: the Codex CLI with a ChatGPT login, to send work to Codex. Codex jobs need macOS or Linux. On Windows the routing between Claude models works, and Codex stays off.
 
 ## Install
@@ -39,7 +39,7 @@ Run the check at any time with `/orchestrator:setup` in a session. From a clone 
 
 0. **Settings.** Run `/orchestrator:configure` in a session and answer its questions, or leave everything at its default and come back to the [Configuration](#configuration) section later. Codex stays off until you turn it on.
 1. **Codex CLI (only to use Codex).** Install it, run `codex login` with your ChatGPT account, and turn Codex on with `/orchestrator:configure` or `node scripts/orch-config.mjs set codexEnabled=true`.
-2. **Jev and its key (for the routing).** Turn Jev on with `/orchestrator:configure` or `node scripts/orch-config.mjs set jevEnabled=true`. Then set the key with `/plugin configure orchestrator@llm-orchestrator` in Claude Code: Claude Code keeps it in the Keychain (or in `~/.claude/.credentials.json`) and passes it to the hook. For scripts and CI, the variable `TYPESAFE_API_KEY` works too. The plugin reads no other place: no key file in your home folder, and never a `.env` in a project, because a cloned repository could ship one and receive your briefs in its own TypeSafe account. The key is never logged.
+2. **Jev and its key (for the routing).** Follow the four steps in [TypeSafe and Jev](#typesafe-and-jev): create a key, enter it with `/plugin configure orchestrator@llm-orchestrator`, set `jevEnabled` to true, and run the check.
 3. **Status line log (optional).** The limit rule and the measurement need the two rate limit percentages, their reset times and the session id. Only the status line receives them. Paste the lines from [scripts/statusline-snippet.sh](scripts/statusline-snippet.sh) into your status line script, after the place where it reads `rate_limits`. The block reads the variables `RATE_5H`, `RATE_7D`, `RATE_5H_RESET`, `RATE_7D_RESET` and `SESSION_ID`; set the ones your script has, and the others are written as null. Without this file the limit rule is off, and everything else works. `node scripts/setup-check.mjs` says when the file is there but comes from an older snippet without the reset times.
 4. **Permission for the Codex workers (optional).** The Codex workers run one Bash command. To avoid a prompt each time, allow it in your settings: `Bash(node */scripts/orch-codex.mjs *)`.
 
@@ -48,6 +48,32 @@ Run the check at any time with `/orchestrator:setup` in a session. From a clone 
 - **To TypeSafe, only while Jev is on:** the brief (the prompt) of each `Agent` call that the hook routes, and nothing else. A brief can hold code and project rules. Set `"routeOtherAgents": false` to keep the briefs of agent types other than the plugin's own workers on your machine, or set `"mode": "off"` to send none.
 - **To OpenAI, only while Codex is on:** the brief of each task that runs on Codex, plus your `~/.claude/CLAUDE.md` and the project's `CLAUDE.md` files for an implement task. A project `CLAUDE.md` that is a link to a file outside the project is not sent.
 - **Nothing else.** The dispatch log, the Codex jobs and the settings stay in `~/.claude/orchestrator/`, readable only by your user. The TypeSafe key is never written to a log.
+
+## TypeSafe and Jev
+
+**What it is.** [TypeSafe](https://typesafe.ai) is a third-party API. Its model Jev is a classifier: it does not write text, it answers fixed questions with probabilities. The plugin asks Jev five questions about each brief: the kind of task, whether it changes files, whether the brief is self-contained, how hard it is, and whether the answer must name every match. A table in code turns the answers into a route. The questions are in [scripts/lib/questions.mjs](scripts/lib/questions.mjs).
+
+**Why the plugin uses it.** The routing needs a judgment about each task, and asking a Claude model for it would spend the same subscription the plugin tries to save. Jev answers in a few hundred milliseconds, and it costs much less than one subagent start.
+
+**It is opt-in.** Jev is off until you turn it on, like Codex. While it is off:
+
+- The hook sends nothing to TypeSafe and does not look for a key.
+- It changes no model. The orchestrator can still pick the plugin's workers, and each runs on the model of its agent file: `searcher` on Haiku, `implementer` on Sonnet, and so on.
+- The rest still works: the Codex workers and their transport, the move of a Codex task to Claude while Codex has no room, the writer lock for the plugin's own workers, and the log.
+- The usage rules do not act, because they work through the routing table: nothing moves to Codex and nothing is capped at Sonnet when Claude usage is high.
+
+**Turn it on:**
+
+1. Create a key in the TypeSafe console: https://console.typesafe.ai/keys.
+2. Run `/plugin configure orchestrator@llm-orchestrator` in Claude Code and enter the key. Claude Code keeps it in the macOS Keychain, or in `~/.claude/.credentials.json` on other systems, and passes it only to this plugin's hooks. For scripts, CI and the evaluation runner, the variable `TYPESAFE_API_KEY` works too. No other place is read: no key file in your home folder, and never a `.env` in a project, because a cloned repository could ship its own key and receive your briefs in its own TypeSafe account.
+3. Set `"jevEnabled": true` with `/orchestrator:configure` or `node scripts/orch-config.mjs set jevEnabled=true`. For one session, `ORCH_JEV_ENABLED=1` or `0` overrides the file. A key alone does not turn Jev on.
+4. Run `/orchestrator:setup`. The row "TypeSafe key" says where the key was found.
+
+**What it sends.** One request per routed `Agent` call: the call's description and its whole prompt, plus the five questions. Nothing else from your machine. A prompt can hold code and project rules. `"routeOtherAgents": false` limits the requests to calls to the plugin's own workers, and `"mode": "off"` stops them all. TypeSafe states that Jev is not trained on customer requests; see its [data handling](https://docs.typesafe.ai/models) and [legal](https://docs.typesafe.ai/legal) pages.
+
+**What it costs.** Jev is paid per input token: $0.042 per million tokens for Jev 1.13 (output is free; price from docs.typesafe.ai/models, checked 2026-09-24). A routed brief measured about 1,000 to 1,700 tokens, so a call costs about $0.00005, or about $1 per 20,000 dispatches. `/orchestrator:report` counts the calls and shows how many of them changed a route. When that share stays near zero, Jev costs money and saves nothing, and you can turn it off.
+
+**When it fails.** On a timeout (`jevTimeoutMs`, 5 seconds by default), an HTTP error or a missing key, the call runs as the orchestrator wrote it. The key is never written to a log; an error text from TypeSafe has the key removed before it is stored.
 
 ## How it works
 
@@ -89,16 +115,6 @@ The hook leaves a call alone in these cases:
 - `routeOtherAgents` is `false`. `ORCH_ROUTE_OTHER_AGENTS=0` does the same for one session.
 
 The briefs of these calls go to TypeSafe, like the briefs for our workers. A project brief can hold code and project rules. With `"routeOtherAgents": false`, such a brief stays on your machine.
-
-### Jev is opt-in
-
-Jev is off until you turn it on, like Codex. While it is off:
-
-- The hook sends no brief to TypeSafe and does not look for a key.
-- It changes no model. The orchestrator can still pick the plugin's workers, and each runs on the model of its agent file: `searcher` on Haiku, `implementer` on Sonnet, and so on.
-- The rest still works: the Codex workers and their transport, the move of a Codex task to Claude while Codex has no room, the writer lock for the plugin's own workers, and the log.
-
-To turn Jev on for all sessions, put `"jevEnabled": true` in `~/.claude/orchestrator/config.json`. For one session, start Claude Code with `ORCH_JEV_ENABLED=1`; `ORCH_JEV_ENABLED=0` turns it off for one session. A key alone does not turn Jev on.
 
 ### Codex is opt-in
 
@@ -246,7 +262,7 @@ All settings live in one file, `~/.claude/orchestrator/config.json`. It is optio
 
 | Key | Default | Meaning |
 | :-- | :-- | :-- |
-| `jevEnabled` | `false` | Let the hook send briefs to Jev. The routing needs it. See "Jev is opt-in". |
+| `jevEnabled` | `false` | Let the hook send briefs to Jev. The routing needs it. See [TypeSafe and Jev](#typesafe-and-jev). |
 | `jevModel` | `jev-latest` | The classifier version. Pin an exact version while measuring, so the routing cannot change under you. |
 | `jevUrl` | the TypeSafe endpoint | Where the classifier request goes. |
 | `jevTimeoutMs` | `5000` | How long to wait for an answer, from 100 to 8000. On a timeout the call runs as written. |

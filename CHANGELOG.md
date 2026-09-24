@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- README: one section "TypeSafe and Jev" says what Jev is, why the plugin uses it, how to turn it on, what it sends, and what it costs. The cost per call is about $0.00005, measured on real briefs; the old figure of $0.0001 was too high.
+
 ## 0.2.0
 
 Changes that need an action after the update:

@@ -1,7 +1,7 @@
 {
   "name": "orchestrator",
   "displayName": "LLM Orchestrator",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Routes subagent work across Claude models and the Codex CLI, inside the Claude Max and ChatGPT subscriptions.",
   "author": {
     "name": "Robert Anton"

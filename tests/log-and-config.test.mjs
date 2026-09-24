@@ -1080,7 +1080,31 @@ test("the setup check says that Jev is off by default and does not look for a ke
     assert.doesNotMatch(off.stdout, /^\S+\s+TypeSafe key:/m);
     assert.match(off.stdout, /OK\s+Other agent types: they pass unchanged while Jev is off/);
     const on = await runNode("scripts/setup-check.mjs", { env: cleanEnv(tempDir, { ORCH_CODEX_ENABLED: "" }) });
-    assert.match(on.stdout, /MISSING\s+TypeSafe key: not found/);
+    assert.match(on.stdout, /MISSING\s+TypeSafe key: not in TYPESAFE_API_KEY/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("the setup check reports the key that the hook found in the plugin option, which the check cannot see", async () => {
+  const tempDir = makeTempDir();
+  try {
+    const env = cleanEnv(tempDir, { ORCH_CODEX_ENABLED: "" });
+    const none = await runNode("scripts/setup-check.mjs", { env });
+    assert.match(none.stdout, /MISSING\s+TypeSafe key: not in TYPESAFE_API_KEY, and no routed call that used a current key place has been logged yet/);
+
+    // A record from before 0.2.0 names a key place that is no longer read. It proves nothing.
+    appendLog({ ts: "2026-09-23T10:00:00Z", event: "dispatch", reason: "search", jev: { kind: "search", key_source: "env_file" } }, env);
+    const old = await runNode("scripts/setup-check.mjs", { env });
+    assert.match(old.stdout, /MISSING\s+TypeSafe key: .*no routed call that used a current key place/);
+
+    appendLog({ ts: "2026-09-24T10:00:00Z", event: "dispatch", reason: "error_no_key", jev: null }, env);
+    const without = await runNode("scripts/setup-check.mjs", { env });
+    assert.match(without.stdout, /MISSING\s+TypeSafe key: .*had no key on its last routed call, 2026-09-24T10:00:00Z/);
+
+    appendLog({ ts: "2026-09-24T11:00:00Z", event: "dispatch", reason: "search", jev: { kind: "search", key_source: "plugin_option" } }, env);
+    const found = await runNode("scripts/setup-check.mjs", { env });
+    assert.match(found.stdout, /OK\s+TypeSafe key: the hook found it in the plugin option on its last routed call, 2026-09-24T11:00:00Z/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

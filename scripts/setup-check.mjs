@@ -7,7 +7,7 @@ import fs from "node:fs";
 
 import { FIXED_MODEL_AGENTS, dataDir, loadConfig } from "./lib/config.mjs";
 import { limitsFile, readLimitsState } from "./lib/context.mjs";
-import { logFile } from "./lib/log.mjs";
+import { logFile, readLogTail } from "./lib/log.mjs";
 import { codexPlatformSupported, codexState, describeTime } from "./lib/provider-state.mjs";
 import { askJev, findApiKey } from "./lib/typesafe.mjs";
 
@@ -81,7 +81,19 @@ const { key, source } = config.jevEnabled ? findApiKey() : { key: null, source: 
 if (!config.jevEnabled) {
   row("OK", "Jev", 'off, so the hook sends no brief to TypeSafe and changes no route. The workers keep the models of their agent files. To route with Jev, set "jevEnabled": true in config.json and add a TypeSafe key');
 } else if (!key) {
-  row("MISSING", "TypeSafe key", "not found in the plugin option or in TYPESAFE_API_KEY. Set it with /plugin configure orchestrator@llm-orchestrator in Claude Code");
+  // Claude Code passes the plugin option only to hooks, so this check cannot see
+  // it. The hook records where it found the key, so the last routed call answers.
+  // Records from before 0.2.0 can name key places that are no longer read, so
+  // only the two current places count.
+  const last = readLogTail()
+    .filter((record) => record.event === "dispatch" && (["plugin_option", "env"].includes(record.jev?.key_source) || record.reason === "error_no_key"))
+    .at(-1);
+  if (last?.jev?.key_source) {
+    row("OK", "TypeSafe key", `the hook found it in the ${last.jev.key_source === "plugin_option" ? "plugin option" : last.jev.key_source} on its last routed call, ${last.ts}. This check cannot see the plugin option itself, so --live cannot test the key`);
+  } else {
+    const when = last ? `the hook had no key on its last routed call, ${last.ts}` : "no routed call that used a current key place has been logged yet";
+    row("MISSING", "TypeSafe key", `not in TYPESAFE_API_KEY, and ${when}. Set it with /plugin configure orchestrator@llm-orchestrator in Claude Code. This check cannot see the plugin option itself; the next routed call shows whether the hook finds it`);
+  }
 } else {
   row("OK", "TypeSafe key", `found (source: ${source})`);
   if (live) {

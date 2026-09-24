@@ -67,7 +67,7 @@ Run the check at any time with `/orchestrator:setup` in a session. From a clone 
 1. Create a key in the TypeSafe console: https://console.typesafe.ai/keys.
 2. Run `/plugin configure orchestrator@llm-orchestrator` in Claude Code and enter the key. Claude Code keeps it in the macOS Keychain, or in `~/.claude/.credentials.json` on other systems, and passes it only to this plugin's hooks. For scripts, CI and the evaluation runner, the variable `TYPESAFE_API_KEY` works too. No other place is read: no key file in your home folder, and never a `.env` in a project, because a cloned repository could ship its own key and receive your briefs in its own TypeSafe account.
 3. Set `"jevEnabled": true` with `/orchestrator:configure` or `node scripts/orch-config.mjs set jevEnabled=true`. For one session, `ORCH_JEV_ENABLED=1` or `0` overrides the file. A key alone does not turn Jev on.
-4. Run `/orchestrator:setup`. The row "TypeSafe key" says where the key was found.
+4. Start a new session and let it delegate one task, then run `/orchestrator:setup`. Claude Code passes the plugin option only to hooks, so the check cannot see the key itself; its row "TypeSafe key" reports where the hook found the key on its last routed call.
 
 **What it sends.** One request per routed `Agent` call: the call's description and its whole prompt, plus the five questions. Nothing else from your machine. A prompt can hold code and project rules. `"routeOtherAgents": false` limits the requests to calls to the plugin's own workers, and `"mode": "off"` stops them all. TypeSafe states that Jev is not trained on customer requests; see its [data handling](https://docs.typesafe.ai/models) and [legal](https://docs.typesafe.ai/legal) pages.
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2
+
+- The setup check no longer reports a key in the plugin option as missing. Claude Code passes that option only to hooks, so the check now reports where the hook found the key on its last routed call.
+
 ## 0.2.1
 
 - README: one section "TypeSafe and Jev" says what Jev is, why the plugin uses it, how to turn it on, what it sends, and what it costs. The cost per call is about $0.00005, measured on real briefs; the old figure of $0.0001 was too high.

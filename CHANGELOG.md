@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+- README: a "Why" section, an "Install" section before the setup, and a correct statement of the one paid API (TypeSafe).
+
 ## 0.1.0
 
 First public release.

@@ -1,6 +1,14 @@
 # LLM Orchestrator
 
-A Claude Code plugin that routes subagent work across Claude models and the Codex CLI. It runs inside the Claude Max and ChatGPT subscriptions. It uses no paid LLM inference API.
+A Claude Code plugin that picks the model for each subagent task. It sends a task to the smallest Claude model that can do it, and it can move work to the Codex CLI.
+
+## Why
+
+A Claude Code session hands work to subagents: searches, edits, reviews, debugging. Without routing, a subagent often runs on the same large model as the main session, even for a simple file search. That uses up the 5-hour and weekly limits of a Claude subscription faster than needed.
+
+The plugin reads each task before it starts and picks a model that fits it: Haiku for a search, Sonnet for most edits and reviews, Opus for hard work. If you turn Codex on, the plugin moves tasks to Codex when your Claude usage gets close to its limit, so your ChatGPT subscription takes part of the work. Reviews then cross the two model families: Codex reviews what Claude wrote, and Claude reviews what Codex wrote.
+
+The plugin calls no Claude or OpenAI API; the work stays inside your subscriptions. The one paid API is TypeSafe's classifier Jev, which reads each task, at about $0.0001 per call.
 
 ## Requirements
 
@@ -8,6 +16,32 @@ A Claude Code plugin that routes subagent work across Claude models and the Code
 - Node.js 20 or newer. The plugin has no npm dependencies.
 - A TypeSafe API key for Jev, the classifier that reads each brief. TypeSafe is a third-party paid API; see [typesafe.ai](https://typesafe.ai). Without a key the hook changes nothing and every call runs as written.
 - Optional: the Codex CLI with a ChatGPT login, to send work to Codex. Codex jobs need macOS or Linux. On Windows the routing between Claude models works, and Codex stays off.
+
+## Install
+
+This repository is also a marketplace (a catalog of plugins that Claude Code can install from), in `.claude-plugin/marketplace.json`. Add it once, then install the plugin for one project:
+
+```bash
+claude plugin marketplace add robertanton81/llm-orchestrator
+```
+
+```bash
+cd /path/to/your-project && claude plugin install orchestrator@llm-orchestrator --scope local
+```
+
+`--scope local` writes the switch to `.claude/settings.local.json` of that project, which git does not track. Leave `--scope` out to turn the plugin on in every project. `claude plugin marketplace update llm-orchestrator` fetches a new version.
+
+Then follow the setup below. Without a TypeSafe key the hook changes no route, and every call runs as written.
+
+## Setup
+
+Run the check at any time with `/orchestrator:setup` in a session. From a clone of this repository the same check is `node scripts/setup-check.mjs --live`. It never prints a secret.
+
+0. **Settings.** Run `/orchestrator:configure` in a session and answer its questions, or leave everything at its default and come back to the [Configuration](#configuration) section later. Codex stays off until you turn it on.
+1. **Codex CLI (only to use Codex).** Install it, run `codex login` with your ChatGPT account, and turn Codex on with `/orchestrator:configure` or `node scripts/orch-config.mjs set codexEnabled=true`.
+2. **TypeSafe key.** The hook looks in four places, in this order: the plugin option `typesafe_api_key`, the variable `TYPESAFE_API_KEY`, the file `~/.config/typesafe/.env`, and the macOS Keychain item `orchestrator-typesafe`. The key is never logged.
+3. **Status line log (optional).** The limit rule and the measurement need the two rate limit percentages, their reset times and the session id. Only the status line receives them. Paste the lines from [scripts/statusline-snippet.sh](scripts/statusline-snippet.sh) into your status line script, after the place where it reads `rate_limits`. The block reads the variables `RATE_5H`, `RATE_7D`, `RATE_5H_RESET`, `RATE_7D_RESET` and `SESSION_ID`; set the ones your script has, and the others are written as null. Without this file the limit rule is off, and everything else works. `node scripts/setup-check.mjs` says when the file is there but comes from an older snippet without the reset times.
+4. **Permission for the Codex workers (optional).** The Codex workers run one Bash command. To avoid a prompt each time, allow it in your settings: `Bash(node */scripts/orch-codex.mjs *)`.
 
 ## What leaves your machine
 
@@ -94,37 +128,13 @@ Task text is not trusted. It can quote a web page or an issue. So it never goes 
 5. Codex reads `AGENTS.md`, not `CLAUDE.md`. So the runner adds your `~/.claude/CLAUDE.md` and the project's `CLAUDE.md` to an implement brief. A project `CLAUDE.md` that is a link to a file outside the project is skipped, so a cloned repository cannot send another file of yours to Codex.
 6. A request id works only for the session, the folder and the kind of job that stored it.
 
-## Setup
-
-Run the check at any time. It never prints a secret.
-
-```bash
-node scripts/setup-check.mjs --live
-```
-
-Inside a session the same check is `/orchestrator:setup`.
-
-0. **Settings.** Run `/orchestrator:configure` in a session and answer its questions, or leave everything at its default and come back to the [Configuration](#configuration) section later. Codex stays off until you turn it on.
-1. **Codex CLI (only to use Codex).** Install it, run `codex login` with your ChatGPT account, and turn Codex on with `/orchestrator:configure` or `node scripts/orch-config.mjs set codexEnabled=true`.
-2. **TypeSafe key.** The hook looks in four places, in this order: the plugin option `typesafe_api_key`, the variable `TYPESAFE_API_KEY`, the file `~/.config/typesafe/.env`, and the macOS Keychain item `orchestrator-typesafe`. The key is never logged.
-3. **Status line log (optional).** The limit rule and the measurement need the two rate limit percentages, their reset times and the session id. Only the status line receives them. Paste the lines from [scripts/statusline-snippet.sh](scripts/statusline-snippet.sh) into your status line script, after the place where it reads `rate_limits`. The block reads the variables `RATE_5H`, `RATE_7D`, `RATE_5H_RESET`, `RATE_7D_RESET` and `SESSION_ID`; set the ones your script has, and the others are written as null. Without this file the limit rule is off, and everything else works. `node scripts/setup-check.mjs` says when the file is there but comes from an older snippet without the reset times.
-4. **Permission for the Codex workers (optional).** The Codex workers run one Bash command. To avoid a prompt each time, allow it in your settings: `Bash(node */scripts/orch-codex.mjs *)`.
-
 ## Use
 
-This repository is also a marketplace (a catalog of plugins that Claude Code can install from), in `.claude-plugin/marketplace.json`. Add it once, then install the plugin for one project:
+After the install and the setup, work as usual. The hook routes each subagent call by itself, and every dispatch goes to the log. `/orchestrator:report` shows what the routing did, and `/orchestrator:configure` changes the settings.
 
-```bash
-claude plugin marketplace add robertanton81/llm-orchestrator
-```
+### Work on the plugin
 
-```bash
-cd /path/to/your-project && claude plugin install orchestrator@llm-orchestrator --scope local
-```
-
-`--scope local` writes the switch to `.claude/settings.local.json` of that project, which git does not track. Leave `--scope` out to turn the plugin on in every project. `claude plugin marketplace update llm-orchestrator` fetches a new version.
-
-To work on the plugin itself, clone the repository and load it for one session with a flag:
+Clone the repository and load it for one session with a flag:
 
 ```bash
 claude --plugin-dir /path/to/llm-orchestrator

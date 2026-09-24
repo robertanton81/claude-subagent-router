@@ -1,0 +1,14 @@
+{
+  "name": "llm-orchestrator",
+  "description": "Marketplace for the orchestrator plugin: routes Claude Code subagent work across Claude models and the Codex CLI.",
+  "owner": {
+    "name": "Robert Anton"
+  },
+  "plugins": [
+    {
+      "name": "orchestrator",
+      "source": "./",
+      "description": "Routes subagent work across Claude models and the Codex CLI, inside the Claude Max and ChatGPT subscriptions."
+    }
+  ]
+}

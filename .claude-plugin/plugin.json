@@ -1,0 +1,19 @@
+{
+  "name": "orchestrator",
+  "displayName": "LLM Orchestrator",
+  "version": "0.1.0",
+  "description": "Routes subagent work across Claude models and the Codex CLI, inside the Claude Max and ChatGPT subscriptions.",
+  "author": {
+    "name": "Robert Anton"
+  },
+  "license": "MIT",
+  "keywords": ["routing", "subagents", "codex", "typesafe"],
+  "userConfig": {
+    "typesafe_api_key": {
+      "type": "string",
+      "title": "TypeSafe API key",
+      "description": "Key for the Jev routing classifier. Leave empty if the key is in ~/.config/typesafe/.env or in TYPESAFE_API_KEY.",
+      "sensitive": true
+    }
+  }
+}

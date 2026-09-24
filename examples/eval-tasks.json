@@ -1,0 +1,18 @@
+{
+  "model": "sonnet",
+  "budgetUsd": 1,
+  "timeoutS": 600,
+  "allowedTools": ["Read", "Glob", "Grep", "Agent"],
+  "tasks": [
+    {
+      "name": "fs-imports",
+      "cwd": "/tmp/orch-live-check",
+      "prompt": "Find out which files under src/ import the module \"node:fs\". You must do this through one call of the Agent tool with subagent_type \"Explore\" and a short, self-contained brief. Do not call Read, Glob or Grep yourself. Answer with the list of files that the Explore agent reported, one path per line, and nothing else.",
+      "expect": {
+        "contains": ["exists.mjs", "reader.mjs"],
+        "notContains": ["paths.mjs"]
+      },
+      "expectRoute": { "agent": "Explore", "model": "haiku" }
+    }
+  ]
+}

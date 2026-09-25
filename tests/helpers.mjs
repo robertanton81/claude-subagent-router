@@ -99,7 +99,7 @@ export function agentCall(overrides = {}) {
     tool_input: {
       description: "Add retry",
       prompt: "Goal: add a retry to the fetch helper.",
-      subagent_type: "orchestrator:implementer",
+      subagent_type: "subagent-router:implementer",
       run_in_background: true
     },
     ...overrides

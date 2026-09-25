@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Checks the setup of the orchestrator plugin - the Codex login, the TypeSafe key, the status line log and the routing mode.
+description: Checks the setup of the subagent-router plugin - the Codex login, the TypeSafe key, the status line log and the routing mode.
 disable-model-invocation: true
 allowed-tools: Bash(node:*)
 argument-hint: "[--live]"

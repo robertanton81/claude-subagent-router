@@ -587,7 +587,7 @@ test("the limit numbers of Codex are saved after a job, and spent credits are re
     const refused = await runNode(CLI, { args: ["implement", "--wait", "20"], stdin: "Goal: x", env: withHome, cwd: tempDir });
     assert.equal(refused.code, 1);
     assert.match(refused.stdout, /^CODEX_FAILED \S+ exit=75\n/);
-    assert.ok(refused.stdout.includes("was not started") && refused.stdout.includes("orchestrator:implementer"), refused.stdout);
+    assert.ok(refused.stdout.includes("was not started") && refused.stdout.includes("subagent-router:implementer"), refused.stdout);
   });
 });
 

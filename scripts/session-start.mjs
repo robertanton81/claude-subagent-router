@@ -68,14 +68,14 @@ function main() {
 
   const codexWorkers = codexOn
     ? [
-        "- orchestrator:codex-implementer: runs the task in the Codex CLI on the ChatGPT plan. Codex starts with no context, so it needs a complete brief.",
-        "- orchestrator:codex-reviewer: runs a Codex review of the uncommitted changes. A line `review-scope: base:<branch>`, `review-scope: commit:<hash>` or `review-scope: custom` in the brief picks another scope. When the hook moves a review from the Claude reviewer to Codex, the brief goes along as the review instructions (scope `custom`)."
+        "- subagent-router:codex-implementer: runs the task in the Codex CLI on the ChatGPT plan. Codex starts with no context, so it needs a complete brief.",
+        "- subagent-router:codex-reviewer: runs a Codex review of the uncommitted changes. A line `review-scope: base:<branch>`, `review-scope: commit:<hash>` or `review-scope: custom` in the brief picks another scope. When the hook moves a review from the Claude reviewer to Codex, the brief goes along as the review instructions (scope `custom`)."
       ]
-    : ["- orchestrator:codex-implementer and orchestrator:codex-reviewer: off. Codex is opt-in, and `codexEnabled` is not true in the configuration. The hook moves a call to them to orchestrator:implementer or orchestrator:reviewer."];
+    : ["- subagent-router:codex-implementer and subagent-router:codex-reviewer: off. Codex is opt-in, and `codexEnabled` is not true in the configuration. The hook moves a call to them to subagent-router:implementer or subagent-router:reviewer."];
 
   const reviewFact = codexOn
     ? "- After each logical piece of work, a reviewer from the other model family checks the change: Codex reviews changes from Claude workers, and the Claude reviewer reviews changes from Codex."
-    : "- After each logical piece of work, orchestrator:reviewer checks the change. While Codex is off, no reviewer from another model family is available.";
+    : "- After each logical piece of work, subagent-router:reviewer checks the change. While Codex is off, no reviewer from another model family is available.";
 
   const jevOn = config.jevEnabled;
   const providerFact = !jevOn
@@ -93,14 +93,14 @@ function main() {
     : ["- Dispatches to other agent types pass unchanged, because `routeOtherAgents` is false in the configuration.", keepLineFact];
 
   const lines = [
-    `The orchestrator plugin is active in "${config.mode}" mode.`,
+    `The subagent-router plugin is active in "${config.mode}" mode.`,
     "",
     "Workers for delegated work:",
-    "- orchestrator:searcher (haiku): finds, reads and explains code. It changes no files.",
-    "- orchestrator:complete-searcher (sonnet): lists every match when the answer is right only if the list is complete, such as every file that calls a function. It changes no files.",
-    "- orchestrator:implementer (sonnet): writes and changes code inside a defined scope.",
-    "- orchestrator:debugger (opus): finds the cause of a failure when the cause is not known.",
-    "- orchestrator:reviewer (sonnet): reviews changes. It changes no files.",
+    "- subagent-router:searcher (haiku): finds, reads and explains code. It changes no files.",
+    "- subagent-router:complete-searcher (sonnet): lists every match when the answer is right only if the list is complete, such as every file that calls a function. It changes no files.",
+    "- subagent-router:implementer (sonnet): writes and changes code inside a defined scope.",
+    "- subagent-router:debugger (opus): finds the cause of a failure when the cause is not known.",
+    "- subagent-router:reviewer (sonnet): reviews changes. It changes no files.",
     ...codexWorkers,
     "",
     "Facts about dispatches:",
@@ -114,14 +114,14 @@ function main() {
     "- Review findings can be wrong. A finding is checked against the code before anyone acts on it.",
     providerFact,
     "",
-    "The skill orchestrator:delegate has the full brief and result formats.",
+    "The skill subagent-router:delegate has the full brief and result formats.",
     ...(noSettingsFileYet()
       ? [
           "",
-          "No settings file exists for this plugin yet, so every setting is at its default, and routing (Jev) and Codex are off. The skill orchestrator:configure asks what the user wants and writes the file. Offer it once if the user has not asked for something else first."
+          "No settings file exists for this plugin yet, so every setting is at its default, and routing (Jev) and Codex are off. The skill subagent-router:configure asks what the user wants and writes the file. Offer it once if the user has not asked for something else first."
         ]
       : []),
-    ...(warnings.length > 0 ? ["", "Problems in the configuration of the orchestrator plugin (file ~/.claude/orchestrator/config.json):", ...warnings.map((warning) => `- ${warning}`)] : [])
+    ...(warnings.length > 0 ? ["", "Problems in the configuration of the subagent-router plugin (file ~/.claude/orchestrator/config.json):", ...warnings.map((warning) => `- ${warning}`)] : [])
   ];
 
   // A notice for the user needs the JSON form, because only `systemMessage` reaches
@@ -147,7 +147,7 @@ function main() {
     const context = [...lines, "", "State of the subscriptions right now:", ...notices.map((notice) => `- ${notice}`)].join("\n");
     process.stdout.write(
       JSON.stringify({
-        systemMessage: `Orchestrator: ${notices.join(" ")}`,
+        systemMessage: `Subagent router: ${notices.join(" ")}`,
         hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: context }
       })
     );
@@ -158,7 +158,7 @@ try {
   main();
 } catch (error) {
   // Fail open: a session must start without the facts rather than not at all.
-  process.stderr.write(`orchestrator session start hook failed: ${error?.message ?? error}\n`);
+  process.stderr.write(`subagent-router session start hook failed: ${error?.message ?? error}\n`);
   appendLog({ ts: new Date().toISOString(), event: "hook_error", hook: "session-start", error: String(error?.message ?? error) });
 }
 process.exitCode = 0;

@@ -78,7 +78,7 @@ function pruneOld() {
       names = fs.readdirSync(dir);
     } catch (error) {
       if (error.code !== "ENOENT") {
-        process.stderr.write(`orchestrator: cannot list ${dir}: ${error.message}\n`);
+        process.stderr.write(`subagent-router: cannot list ${dir}: ${error.message}\n`);
       }
       continue;
     }
@@ -90,7 +90,7 @@ function pruneOld() {
         }
       } catch (error) {
         if (error.code !== "ENOENT") {
-          process.stderr.write(`orchestrator: cannot remove the old entry ${entry}: ${error.message}\n`);
+          process.stderr.write(`subagent-router: cannot remove the old entry ${entry}: ${error.message}\n`);
         }
       }
     }
@@ -117,7 +117,7 @@ function claudeRules(cwd, config) {
         // A cloned repository can hold a CLAUDE.md link to any file on this
         // machine. Its target would travel to Codex, so it is skipped.
         notes.push(`${file}: NOT included (${outside})`);
-        process.stderr.write(`orchestrator: the rules file ${file} was skipped: ${outside}\n`);
+        process.stderr.write(`subagent-router: the rules file ${file} was skipped: ${outside}\n`);
         continue;
       }
       const text = fs.readFileSync(file, "utf8").trim();
@@ -131,7 +131,7 @@ function claudeRules(cwd, config) {
       if (error.code !== "ENOENT") {
         // The file exists but cannot be read. Codex would run without these rules, so say so.
         notes.push(`${file}: NOT included (${error.code ?? error.message})`);
-        process.stderr.write(`orchestrator: the rules file ${file} could not be read: ${error.message}\n`);
+        process.stderr.write(`subagent-router: the rules file ${file} could not be read: ${error.message}\n`);
       }
     }
   }
@@ -178,7 +178,7 @@ function startJob({ kind, model, effort, scope, brief, cwd }) {
   }
   const { config, warnings } = loadConfig();
   for (const warning of warnings) {
-    process.stderr.write(`orchestrator config: ${warning}\n`);
+    process.stderr.write(`subagent-router config: ${warning}\n`);
   }
 
   const job = {
@@ -231,7 +231,7 @@ function startJob({ kind, model, effort, scope, brief, cwd }) {
     // The pid lets a later `wait` see that the runner died without a result.
     fs.writeFileSync(path.join(dir, "runner.pid"), String(child.pid ?? ""), { mode: 0o600 });
   } catch (error) {
-    process.stderr.write(`orchestrator: runner.pid could not be written for the job ${job.id}: ${error.message}\n`);
+    process.stderr.write(`subagent-router: runner.pid could not be written for the job ${job.id}: ${error.message}\n`);
   }
   child.unref();
   return dir;
@@ -349,7 +349,7 @@ function printResult(dir) {
   const reasons = [];
   if (isUsageLimitMessage(events.error)) {
     markCodexUnavailable(events.error);
-    reasons.push("Codex has no capacity left. Tell the user in one sentence, and send this task to a Claude worker now: orchestrator:implementer, or orchestrator:reviewer for a review. The routing hook does the same for later Codex tasks until the plan resets.");
+    reasons.push("Codex has no capacity left. Tell the user in one sentence, and send this task to a Claude worker now: subagent-router:implementer, or subagent-router:reviewer for a review. The routing hook does the same for later Codex tasks until the plan resets.");
   }
   if (events.error) {
     reasons.push(`Codex reported: ${events.error}`);
@@ -416,7 +416,7 @@ function waitSecondsFromEnv() {
   if (Number.isFinite(seconds) && seconds >= 0 && seconds <= 570) {
     return seconds;
   }
-  process.stderr.write(`orchestrator: ORCH_CODEX_WAIT_SECONDS="${raw}" is not a number from 0 to 570, so ${DEFAULT_WAIT_SECONDS} is used\n`);
+  process.stderr.write(`subagent-router: ORCH_CODEX_WAIT_SECONDS="${raw}" is not a number from 0 to 570, so ${DEFAULT_WAIT_SECONDS} is used\n`);
   return DEFAULT_WAIT_SECONDS;
 }
 
@@ -503,10 +503,10 @@ async function cancelJob(dir) {
   // A lock that stays is no harm: the exit code below marks its job as ended,
   // and the next start removes it as dead.
   if (job.kind === "implement" && !releaseWriterLock(job.cwd, id)) {
-    process.stderr.write(`orchestrator: the writer lock of the job ${id} was not given back, because another start held its breaker; the next start removes it\n`);
+    process.stderr.write(`subagent-router: the writer lock of the job ${id} was not given back, because another start held its breaker; the next start removes it\n`);
   }
   if (!fs.existsSync(path.join(dir, "exit-code"))) {
-    fs.appendFileSync(path.join(dir, "stderr.log"), "\norchestrator: the job was cancelled\n");
+    fs.appendFileSync(path.join(dir, "stderr.log"), "\nsubagent-router: the job was cancelled\n");
     fs.writeFileSync(path.join(dir, "exit-code"), "130");
   }
   process.stdout.write(`CODEX_CANCELLED ${id}\nThe job was stopped. Files that Codex had already changed stay changed.\n`);
@@ -556,7 +556,7 @@ async function jobDirOfRequest(id) {
       } catch (error) {
         // The job runs. A later `run` then finds the claim without a job and
         // gives up, which is better than a second job for the same task.
-        process.stderr.write(`orchestrator: the job ${path.basename(dir)} could not be recorded for the request ${id}: ${error.message}\n`);
+        process.stderr.write(`subagent-router: the job ${path.basename(dir)} could not be recorded for the request ${id}: ${error.message}\n`);
       }
       return dir;
     }

@@ -92,7 +92,7 @@ if (!config.jevEnabled) {
     row("OK", "TypeSafe key", `the hook found it in the ${last.jev.key_source === "plugin_option" ? "plugin option" : last.jev.key_source} on its last routed call, ${last.ts}. This check cannot see the plugin option itself, so --live cannot test the key`);
   } else {
     const when = last ? `the hook had no key on its last routed call, ${last.ts}` : "no routed call that used a current key place has been logged yet";
-    row("MISSING", "TypeSafe key", `not in TYPESAFE_API_KEY, and ${when}. Copy the key, then run in a terminal: k=$(pbpaste) && claude plugin install orchestrator@llm-orchestrator --config "typesafe_api_key=$k"; unset k (add the --scope of your install). This check cannot see the plugin option itself; the next routed call shows whether the hook finds it`);
+    row("MISSING", "TypeSafe key", `not in TYPESAFE_API_KEY, and ${when}. Copy the key, then run in a terminal: k=$(pbpaste) && claude plugin install subagent-router@claude-subagent-router --config "typesafe_api_key=$k"; unset k (add the --scope of your install). This check cannot see the plugin option itself; the next routed call shows whether the hook finds it`);
   }
 } else {
   row("OK", "TypeSafe key", `found (source: ${source})`);

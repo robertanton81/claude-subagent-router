@@ -195,7 +195,7 @@ export function firstNotice(sessionId, key, env = process.env) {
     }
   } catch (error) {
     // A notice too many is better than a switch the user never hears about.
-    process.stderr.write(`orchestrator: cannot save the notice state: ${error.message}\n`);
+    process.stderr.write(`subagent-router: cannot save the notice state: ${error.message}\n`);
     return true;
   }
   pruneOldNotices(dir);
@@ -218,6 +218,6 @@ function pruneOldNotices(dir) {
       }
     }
   } catch (error) {
-    process.stderr.write(`orchestrator: cannot clean up old notice marks: ${error.message}\n`);
+    process.stderr.write(`subagent-router: cannot clean up old notice marks: ${error.message}\n`);
   }
 }

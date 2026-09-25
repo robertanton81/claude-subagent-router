@@ -10,8 +10,13 @@ import fs from "node:fs";
 
 import { REVIEWER_SET, WORKER_SET, loadConfig } from "./lib/config.mjs";
 import { recordWriterLaunch, recordWriterStop } from "./lib/context.mjs";
-import { countFindings, reportsNoWrite } from "./lib/findings.mjs";
-import { appendLog, truncate } from "./lib/log.mjs";
+import { countFindings, reportsNoWrite, verificationText } from "./lib/findings.mjs";
+import { appendLog, registerSecret, truncate } from "./lib/log.mjs";
+import { askVerification, findApiKey } from "./lib/typesafe.mjs";
+
+// Claude Code stops this hook after 5 seconds (hooks/hooks.json). The Jev call
+// must end well before that, whatever `jevTimeoutMs` says.
+const VERIFICATION_TIMEOUT_MS = 3000;
 
 function launchedRecord(input) {
   const response = input.tool_response ?? {};
@@ -43,11 +48,46 @@ function stopRecord(input, config) {
   return record;
 }
 
-function main() {
+// Asks Jev how the checks of a finished worker ended, and logs the answer as
+// its own record. The stop record is already written, so a slow or killed call
+// loses only this label, and the report then reads the words of the result.
+// It runs only while Jev is on and the mode is not "off", like the routing,
+// and sends only the verification part of the result.
+async function logVerification(input, config, base) {
+  if (!config.jevEnabled || config.mode === "off" || !WORKER_SET.has(input.agent_type)) {
+    return;
+  }
+  const text = verificationText(input.last_assistant_message);
+  if (!text) {
+    return;
+  }
+  const { key, source } = findApiKey();
+  if (!key) {
+    return;
+  }
+  registerSecret(key);
+  const record = { ...base, event: "verification", agent_id: input.agent_id ?? null, agent_type: input.agent_type };
+  try {
+    const answer = await askVerification(text, config, key, Math.min(config.jevTimeoutMs, VERIFICATION_TIMEOUT_MS));
+    appendLog({
+      ...record,
+      outcome: answer.outcome,
+      confidence: answer.confidence,
+      latency_ms: answer.latencyMs,
+      usage: answer.usage,
+      model: answer.model,
+      key_source: source
+    });
+  } catch (error) {
+    appendLog({ ...record, error: error.code ?? "unknown", detail: error.message, key_source: source });
+  }
+}
+
+async function main() {
   const input = JSON.parse(fs.readFileSync(0, "utf8"));
   const { config, warnings } = loadConfig();
   for (const warning of warnings) {
-    process.stderr.write(`orchestrator config: ${warning}\n`);
+    process.stderr.write(`subagent-router config: ${warning}\n`);
   }
   const base = { ts: new Date().toISOString(), session_id: input.session_id ?? null, cwd: input.cwd ?? null };
 
@@ -72,17 +112,18 @@ function main() {
       }
       appendLog({ ...base, ...stopRecord(input, config) });
       recordWriterStop(base.session_id, input.agent_type, input.agent_id, reportsNoWrite(input.last_assistant_message));
+      await logVerification(input, config, base);
       break;
     default:
-      process.stderr.write(`orchestrator log hook: no handler for the event ${input.hook_event_name}\n`);
+      process.stderr.write(`subagent-router log hook: no handler for the event ${input.hook_event_name}\n`);
       break;
   }
 }
 
 try {
-  main();
+  await main();
 } catch (error) {
-  process.stderr.write(`orchestrator log hook failed: ${error?.message ?? error}\n`);
+  process.stderr.write(`subagent-router log hook failed: ${error?.message ?? error}\n`);
   appendLog({ ts: new Date().toISOString(), event: "hook_error", hook: "log", error: String(error?.message ?? error) });
 }
 process.exitCode = 0;

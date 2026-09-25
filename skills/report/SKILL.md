@@ -1,6 +1,6 @@
 ---
 name: report
-description: Prints the numbers of the orchestrator's measurement store - what the hook changed, what Jev answered, the labels for a route that was too small, the durations, the review findings by author family, and Claude usage over time.
+description: Prints the numbers of the subagent-router plugin's measurement store - what the hook changed, what Jev answered, the labels for a route that was too small, the durations, the review findings by author family, and Claude usage over time.
 disable-model-invocation: true
 allowed-tools: Bash(node:*)
 argument-hint: "[--json] [--since <date>] [--project <text>]"

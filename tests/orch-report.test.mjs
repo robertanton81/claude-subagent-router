@@ -31,54 +31,54 @@ function writeStore(dataDir) {
 
   const older = [
     // From before the store had `cwd`: counted, but dropped by a project filter and by --since 2026-09-22.
-    { ts: "2026-09-21T15:00:00.000Z", event: "dispatch", session_id: "s0", tool_use_id: "t0", mode: "enforce", requested: { agent: "orchestrator:implementer", model: null }, final: { agent: "orchestrator:implementer", model: null }, action: "agree", reason: "implement", jev: jev(), prompt: SECRET },
+    { ts: "2026-09-21T15:00:00.000Z", event: "dispatch", session_id: "s0", tool_use_id: "t0", mode: "enforce", requested: { agent: "subagent-router:implementer", model: null }, final: { agent: "subagent-router:implementer", model: null }, action: "agree", reason: "implement", jev: jev(), prompt: SECRET },
     "{broken line"
   ];
 
   const current = [
     { ts: at("09:00"), event: "session", ...s1, source: "startup", config },
     // d1: a search brief sent to the implementer, rewritten to the searcher.
-    dispatch(s1, "09:01", { tool_use_id: "t1", requested: { agent: "orchestrator:implementer", model: null }, final: { agent: "orchestrator:searcher", model: "haiku" }, action: "rewrite", reason: "search", route: { agent: "orchestrator:searcher", model: "haiku", reason: "search" }, would_route: { model: "sonnet", reason: "needs_every_match" }, jev: jev({ kind: "search", kindConfidence: 0.97, writesFiles: 0.03, difficulty: 0.4, difficultyConfidence: 0.7, latency_ms: 200 }), claude: calm, prompt: `${SECRET} one` }),
-    ...run(s1, "09:01", "t1", "a1", "orchestrator:searcher", "09:02", { result: "Changed files: none\nVerification: read only\nOpen problems: none" }),
+    dispatch(s1, "09:01", { tool_use_id: "t1", requested: { agent: "subagent-router:implementer", model: null }, final: { agent: "subagent-router:searcher", model: "haiku" }, action: "rewrite", reason: "search", route: { agent: "subagent-router:searcher", model: "haiku", reason: "search" }, would_route: { model: "sonnet", reason: "needs_every_match" }, jev: jev({ kind: "search", kindConfidence: 0.97, writesFiles: 0.03, difficulty: 0.4, difficultyConfidence: 0.7, latency_ms: 200 }), claude: calm, prompt: `${SECRET} one` }),
+    ...run(s1, "09:01", "t1", "a1", "subagent-router:searcher", "09:02", { result: "Changed files: none\nVerification: read only\nOpen problems: none" }),
     // d2: Jev agrees; the implementer writes, and its verification failed.
-    dispatch(s1, "09:05", { tool_use_id: "t2", requested: { agent: "orchestrator:implementer", model: null }, final: { agent: "orchestrator:implementer", model: null }, action: "agree", reason: "implement", route: { agent: "orchestrator:implementer", model: "sonnet", reason: "implement" }, jev: jev({ latency_ms: 400 }), claude: calm, prompt: `${SECRET} two` }),
-    ...run(s1, "09:05", "t2", "a2", "orchestrator:implementer", "09:10", { result: "Changed files: x.js\nVerification: npm test failed with 2 errors\nOpen problems: none" }),
+    dispatch(s1, "09:05", { tool_use_id: "t2", requested: { agent: "subagent-router:implementer", model: null }, final: { agent: "subagent-router:implementer", model: null }, action: "agree", reason: "implement", route: { agent: "subagent-router:implementer", model: "sonnet", reason: "implement" }, jev: jev({ latency_ms: 400 }), claude: calm, prompt: `${SECRET} two` }),
+    ...run(s1, "09:05", "t2", "a2", "subagent-router:implementer", "09:10", { result: "Changed files: x.js\nVerification: npm test failed with 2 errors\nOpen problems: none" }),
     // d3: a review after a Claude writer goes to Codex and finds things.
-    dispatch(s1, "09:12", { tool_use_id: "t3", requested: { agent: "orchestrator:reviewer", model: null }, final: { agent: "orchestrator:codex-reviewer", model: "haiku" }, action: "rewrite", reason: "cross_review", route: { agent: "orchestrator:codex-reviewer", model: "haiku", reason: "cross_review" }, jev: jev({ kind: "review", writesFiles: 0.02 }), claude: calm, prompt: `${SECRET} review` }),
-    ...run(s1, "09:12", "t3", "a3", "orchestrator:codex-reviewer", "09:15", { findings: { P0: 0, P1: 1, P2: 2, P3: 0 } }),
+    dispatch(s1, "09:12", { tool_use_id: "t3", requested: { agent: "subagent-router:reviewer", model: null }, final: { agent: "subagent-router:codex-reviewer", model: "haiku" }, action: "rewrite", reason: "cross_review", route: { agent: "subagent-router:codex-reviewer", model: "haiku", reason: "cross_review" }, jev: jev({ kind: "review", writesFiles: 0.02 }), claude: calm, prompt: `${SECRET} review` }),
+    ...run(s1, "09:12", "t3", "a3", "subagent-router:codex-reviewer", "09:15", { findings: { P0: 0, P1: 1, P2: 2, P3: 0 } }),
     // d4: the same brief as d2 again, on opus: a retry on a bigger model. Its worker wrote and passed.
-    dispatch(s1, "09:20", { tool_use_id: "t4", requested: { agent: "orchestrator:implementer", model: "opus" }, final: { agent: "orchestrator:implementer", model: "opus" }, action: "pass", reason: "keep_requested", route: { agent: "orchestrator:implementer", model: "sonnet", reason: "implement" }, jev: jev(), claude: calm, prompt: `${SECRET} two` }),
-    ...run(s1, "09:20", "t4", "a4", "orchestrator:implementer", "09:30", { result: "Changed files: y.js\nVerification: npm test, 12 passed\nOpen problems: none" }),
+    dispatch(s1, "09:20", { tool_use_id: "t4", requested: { agent: "subagent-router:implementer", model: "opus" }, final: { agent: "subagent-router:implementer", model: "opus" }, action: "pass", reason: "keep_requested", route: { agent: "subagent-router:implementer", model: "sonnet", reason: "implement" }, jev: jev(), claude: calm, prompt: `${SECRET} two` }),
+    ...run(s1, "09:20", "t4", "a4", "subagent-router:implementer", "09:30", { result: "Changed files: y.js\nVerification: npm test, 12 passed\nOpen problems: none" }),
     // d5: a hard task goes to Codex, and the job fails: not an author.
-    dispatch(s1, "09:31", { tool_use_id: "t5", requested: { agent: "orchestrator:implementer", model: null }, final: { agent: "orchestrator:codex-implementer", model: "haiku" }, action: "rewrite", reason: "hard_and_self_contained", route: { agent: "orchestrator:codex-implementer", model: "haiku", reason: "hard_and_self_contained" }, jev: jev({ difficulty: 2.4 }), claude: calm, prompt: `${SECRET} hard` }),
-    ...run(s1, "09:31", "t5", "a5", "orchestrator:codex-implementer", "09:33", { result: "CODEX_FAILED 20260922-093100-a1b2c3 runner_died\nThe runner ended without an exit code.\nDetails: /x" }),
+    dispatch(s1, "09:31", { tool_use_id: "t5", requested: { agent: "subagent-router:implementer", model: null }, final: { agent: "subagent-router:codex-implementer", model: "haiku" }, action: "rewrite", reason: "hard_and_self_contained", route: { agent: "subagent-router:codex-implementer", model: "haiku", reason: "hard_and_self_contained" }, jev: jev({ difficulty: 2.4 }), claude: calm, prompt: `${SECRET} hard` }),
+    ...run(s1, "09:31", "t5", "a5", "subagent-router:codex-implementer", "09:33", { result: "CODEX_FAILED 20260922-093100-a1b2c3 runner_died\nThe runner ended without an exit code.\nDetails: /x" }),
     // d6: a review now, moved to the Claude reviewer with a notice: the author is still the Claude worker of d4.
-    dispatch(s1, "09:34", { tool_use_id: "t6", requested: { agent: "orchestrator:reviewer", model: null }, final: { agent: "orchestrator:reviewer", model: "sonnet" }, action: "rewrite", reason: "codex_unavailable", route: { agent: "orchestrator:reviewer", model: "sonnet", reason: "codex_unavailable" }, jev: jev({ kind: "review", writesFiles: 0.02 }), claude: calm, notice: "Codex reported that the ChatGPT plan has no capacity left. Until 24 Sept, 13:25, tasks for Codex run on Claude workers instead.", prompt: `${SECRET} review two` }),
-    ...run(s1, "09:34", "t6", "a6", "orchestrator:reviewer", "09:36", { findings: { P0: 0, P1: 0, P2: 0, P3: 1 } }),
+    dispatch(s1, "09:34", { tool_use_id: "t6", requested: { agent: "subagent-router:reviewer", model: null }, final: { agent: "subagent-router:reviewer", model: "sonnet" }, action: "rewrite", reason: "codex_unavailable", route: { agent: "subagent-router:reviewer", model: "sonnet", reason: "codex_unavailable" }, jev: jev({ kind: "review", writesFiles: 0.02 }), claude: calm, notice: "Codex reported that the ChatGPT plan has no capacity left. Until 24 Sept, 13:25, tasks for Codex run on Claude workers instead.", prompt: `${SECRET} review two` }),
+    ...run(s1, "09:34", "t6", "a6", "subagent-router:reviewer", "09:36", { findings: { P0: 0, P1: 0, P2: 0, P3: 1 } }),
     // d7: Codex writes and succeeds. d8: the Claude reviewer checks it, so its findings count for the Codex family.
-    dispatch(s1, "09:40", { tool_use_id: "t7", requested: { agent: "orchestrator:codex-implementer", model: null }, final: { agent: "orchestrator:codex-implementer", model: null }, action: "agree", reason: "hard_and_self_contained", route: { agent: "orchestrator:codex-implementer", model: "haiku", reason: "hard_and_self_contained" }, jev: jev({ difficulty: 2.2 }), claude: calm, prompt: `${SECRET} codex` }),
-    ...run(s1, "09:40", "t7", "a7", "orchestrator:codex-implementer", "09:50", { result: "Changed files: z.js\nVerification: node --test, 3 passed\nOpen problems: none" }),
-    dispatch(s1, "09:51", { tool_use_id: "t8", requested: { agent: "orchestrator:reviewer", model: null }, final: { agent: "orchestrator:reviewer", model: null }, action: "agree", reason: "cross_review", route: { agent: "orchestrator:reviewer", model: "sonnet", reason: "cross_review" }, jev: jev({ kind: "review", writesFiles: 0.02 }), claude: calm, prompt: `${SECRET} review three` }),
-    ...run(s1, "09:51", "t8", "a8", "orchestrator:reviewer", "09:53", { findings: { P0: 0, P1: 0, P2: 1, P3: 0 } }),
+    dispatch(s1, "09:40", { tool_use_id: "t7", requested: { agent: "subagent-router:codex-implementer", model: null }, final: { agent: "subagent-router:codex-implementer", model: null }, action: "agree", reason: "hard_and_self_contained", route: { agent: "subagent-router:codex-implementer", model: "haiku", reason: "hard_and_self_contained" }, jev: jev({ difficulty: 2.2 }), claude: calm, prompt: `${SECRET} codex` }),
+    ...run(s1, "09:40", "t7", "a7", "subagent-router:codex-implementer", "09:50", { result: "Changed files: z.js\nVerification: node --test, 3 passed\nOpen problems: none" }),
+    dispatch(s1, "09:51", { tool_use_id: "t8", requested: { agent: "subagent-router:reviewer", model: null }, final: { agent: "subagent-router:reviewer", model: null }, action: "agree", reason: "cross_review", route: { agent: "subagent-router:reviewer", model: "sonnet", reason: "cross_review" }, jev: jev({ kind: "review", writesFiles: 0.02 }), claude: calm, prompt: `${SECRET} review three` }),
+    ...run(s1, "09:51", "t8", "a8", "subagent-router:reviewer", "09:53", { findings: { P0: 0, P1: 0, P2: 1, P3: 0 } }),
     // A verification that did not run, and a Codex worker that was still running when it answered.
-    ...run(s1, "09:55", "t9", "a9", "orchestrator:implementer", "09:56", { result: "Changed files: none\nVerification: not run, no test command\nOpen problems: none" }),
-    ...run(s1, "09:57", "t10", "a10", "orchestrator:codex-implementer", "09:58", { result: "STILL_RUNNING 20260922-095700-abcdef\nWait with: node scripts/orch-codex.mjs wait ..." }),
+    ...run(s1, "09:55", "t9", "a9", "subagent-router:implementer", "09:56", { result: "Changed files: none\nVerification: not run, no test command\nOpen problems: none" }),
+    ...run(s1, "09:57", "t10", "a10", "subagent-router:codex-implementer", "09:58", { result: "STILL_RUNNING 20260922-095700-abcdef\nWait with: node scripts/orch-codex.mjs wait ..." }),
     { ts: at("09:59"), event: "hook_error", hook: "log", error: "boom" },
 
     // A shadow session: the hook logs the route and changes nothing.
     { ts: at("10:00"), event: "session", ...s2, source: "resume", config },
-    dispatch(s2, "10:01", { tool_use_id: "u1", requested: { agent: "orchestrator:implementer", model: null }, final: { agent: "orchestrator:implementer", model: null }, action: "shadow", reason: "mechanical_edit", route: { agent: "orchestrator:implementer", model: "haiku", reason: "mechanical_edit" }, jev: jev({ kind: "mechanical_edit", difficulty: 0.2 }), claude: calm, prompt: `${SECRET} e1` }),
+    dispatch(s2, "10:01", { tool_use_id: "u1", requested: { agent: "subagent-router:implementer", model: null }, final: { agent: "subagent-router:implementer", model: null }, action: "shadow", reason: "mechanical_edit", route: { agent: "subagent-router:implementer", model: "haiku", reason: "mechanical_edit" }, jev: jev({ kind: "mechanical_edit", difficulty: 0.2 }), claude: calm, prompt: `${SECRET} e1` }),
     // Jev was not sure of the kind, and its difficulty confidence is under the gate.
-    dispatch(s2, "10:02", { tool_use_id: "u2", requested: { agent: "orchestrator:debugger", model: null }, final: { agent: "orchestrator:debugger", model: null }, action: "pass", reason: "low_confidence", route: { agent: null, model: null, reason: "low_confidence" }, jev: jev({ kind: "debug", kindConfidence: 0.4, difficultyConfidence: 0.3, latency_ms: 900 }), claude: calm, prompt: `${SECRET} e2` }),
+    dispatch(s2, "10:02", { tool_use_id: "u2", requested: { agent: "subagent-router:debugger", model: null }, final: { agent: "subagent-router:debugger", model: null }, action: "pass", reason: "low_confidence", route: { agent: null, model: null, reason: "low_confidence" }, jev: jev({ kind: "debug", kindConfidence: 0.4, difficultyConfidence: 0.3, latency_ms: 900 }), claude: calm, prompt: `${SECRET} e2` }),
     // Jev timed out.
-    dispatch(s2, "10:03", { tool_use_id: "u3", requested: { agent: "orchestrator:implementer", model: null }, final: { agent: "orchestrator:implementer", model: null }, action: "pass", reason: "error_timeout", jev: { error: "timeout", detail: "5000 ms", key_source: "env" }, claude: calm, prompt: `${SECRET} e3` }),
+    dispatch(s2, "10:03", { tool_use_id: "u3", requested: { agent: "subagent-router:implementer", model: null }, final: { agent: "subagent-router:implementer", model: null }, action: "pass", reason: "error_timeout", jev: { error: "timeout", detail: "5000 ms", key_source: "env" }, claude: calm, prompt: `${SECRET} e3` }),
 
     // An enforce session in the same project: a denial, the pace rule on another agent type with a notice, and a fallback.
     // Its configuration differs in one value, so the report must take the newest session's configuration.
     { ts: at("10:10"), event: "session", ...s3, source: "startup", config: { ...config, paceAfter: 0.25 } },
-    dispatch(s3, "10:11", { tool_use_id: "v1", requested: { agent: "orchestrator:implementer", model: null }, final: { agent: "orchestrator:implementer", model: null }, action: "deny", reason: "codex_writer_busy", jev: null, claude: calm, prompt: `${SECRET} e4` }),
+    dispatch(s3, "10:11", { tool_use_id: "v1", requested: { agent: "subagent-router:implementer", model: null }, final: { agent: "subagent-router:implementer", model: null }, action: "deny", reason: "codex_writer_busy", jev: null, claude: calm, prompt: `${SECRET} e4` }),
     dispatch(s3, "10:12", { tool_use_id: "v2", requested: { agent: "dotnet-implementer", model: null }, final: { agent: "dotnet-implementer", model: "sonnet" }, action: "rewrite", reason: "implement", model_only: true, route: { agent: "dotnet-implementer", model: "sonnet", reason: "implement" }, jev: jev(), claude: { tight: true, reason: "pace", windows: {} }, notice: "Claude usage is at 50% of the 5-hour window. At this pace the 5-hour window runs out before it resets at 22 Sept, 13:00 (about 125% by then). Tasks with a complete brief now run on Codex, to save the Claude limit.", prompt: `${SECRET} e5` }),
-    dispatch(s3, "10:13", { tool_use_id: "v3", requested: { agent: "orchestrator:codex-implementer", model: null }, final: { agent: "orchestrator:implementer", model: "sonnet" }, action: "fallback", reason: "codex_disabled", jev: jev({ kindConfidence: 0.3 }), claude: { tight: true, reason: "gate", windows: {} }, notice: 'Codex is off, because "codexEnabled" is not true in ~/.claude/orchestrator/config.json. Tasks for Codex run on Claude workers instead.', prompt: `${SECRET} e6` })
+    dispatch(s3, "10:13", { tool_use_id: "v3", requested: { agent: "subagent-router:codex-implementer", model: null }, final: { agent: "subagent-router:implementer", model: "sonnet" }, action: "fallback", reason: "codex_disabled", jev: jev({ kindConfidence: 0.3 }), claude: { tight: true, reason: "gate", windows: {} }, notice: 'Codex is off, because "codexEnabled" is not true in ~/.claude/orchestrator/config.json. Tasks for Codex run on Claude workers instead.', prompt: `${SECRET} e6` })
   ];
 
   const lines = (records) => `${records.map((record) => (typeof record === "string" ? record : JSON.stringify(record))).join("\n")}\n`;
@@ -143,12 +143,12 @@ test("the report counts the store: dispatches, the changed share, Jev, the label
     // Agreed: the four "agree" actions. Abstained: the low-confidence answer, and the fallback whose Jev answer named no route.
     assert.deepEqual(j.againstRequest, { agreed: 4, differed: 7, abstained: 2 });
 
-    assert.deepEqual(report.underRouting, { retriesBigger: 1, retriesOther: 0, verificationFailed: 1, verificationNotRun: 1, codexFailed: { count: 1, byCode: { runner_died: 1 } }, stillRunning: 1 });
+    assert.deepEqual(report.underRouting, { retriesBigger: 1, retriesOther: 0, verificationFailed: 1, verificationNotRun: 1, verificationJudgedByJev: 0, codexFailed: { count: 1, byCode: { runner_died: 1 } }, stillRunning: 1 });
 
-    assert.deepEqual(Object.keys(report.durations).sort(), ["orchestrator:codex-implementer", "orchestrator:codex-reviewer", "orchestrator:implementer", "orchestrator:reviewer", "orchestrator:searcher"]);
+    assert.deepEqual(Object.keys(report.durations).sort(), ["subagent-router:codex-implementer", "subagent-router:codex-reviewer", "subagent-router:implementer", "subagent-router:reviewer", "subagent-router:searcher"]);
     // The implementer ran three times: 5, 10 and 1 minutes.
-    assert.deepEqual(report.durations["orchestrator:implementer"], { count: 3, medianMs: 300000, meanMs: 320000, maxMs: 600000 });
-    assert.deepEqual(report.durations["orchestrator:searcher"], { count: 1, medianMs: 60000, meanMs: 60000, maxMs: 60000 });
+    assert.deepEqual(report.durations["subagent-router:implementer"], { count: 3, medianMs: 300000, meanMs: 320000, maxMs: 600000 });
+    assert.deepEqual(report.durations["subagent-router:searcher"], { count: 1, medianMs: 60000, meanMs: 60000, maxMs: 60000 });
 
     // Two reviews after Claude writers (d3 after d2, d6 after d4; the failed Codex job of d5 is no author), one after the Codex writer of d7.
     assert.deepEqual(report.findings, { claude: { reviews: 2, P0: 0, P1: 1, P2: 2, P3: 1 }, codex: { reviews: 1, P0: 0, P1: 0, P2: 1, P3: 0 } });
@@ -250,6 +250,36 @@ test("the report counts a rule that only watched, and leaves the routes it did n
   assert.match(renderText(report), /A rule that only watched would have changed: 2 of 3: needs_every_match 2/);
 });
 
+test("records from before the rename count under the new worker names", () => {
+  // Up to 0.2.3 the plugin was "orchestrator". An old Claude writer is reviewed by
+  // a new Codex reviewer, and a new Codex writer by an old Claude reviewer.
+  const at = (minute) => `2026-09-24T10:${minute}:00.000Z`;
+  const base = { session_id: "s", cwd: "/work/p" };
+  const run = (minute, id, agentType, stopFields) => [
+    { ...base, ts: at(minute), event: "launched", tool_use_id: `t${id}`, agent_id: `a${id}`, final: { agent: agentType, model: null } },
+    { ...base, ts: at(minute), event: "start", agent_id: `a${id}`, agent_type: agentType },
+    { ...base, ts: at(minute + 1), event: "stop", agent_id: `a${id}`, agent_type: agentType, ...stopFields }
+  ];
+  const dispatch = (minute, id, agent) => ({ ...base, ts: at(minute), event: "dispatch", mode: "enforce", tool_use_id: `t${id}`, requested: { agent, model: null }, final: { agent, model: null }, action: "agree", reason: "implement" });
+  const report = buildReport({
+    dataDir: "/tmp/none",
+    log: [
+      dispatch(10, 1, "orchestrator:implementer"),
+      ...run(10, 1, "orchestrator:implementer", { result: "Changed files: a.js\nVerification: npm test, 3 passed\nOpen problems: none" }),
+      dispatch(20, 2, "subagent-router:codex-reviewer"),
+      ...run(20, 2, "subagent-router:codex-reviewer", { findings: { P0: 0, P1: 1, P2: 0, P3: 0 } }),
+      dispatch(30, 3, "subagent-router:codex-implementer"),
+      ...run(30, 3, "subagent-router:codex-implementer", { result: "Changed files: b.js\nVerification: node --test, 2 passed\nOpen problems: none" }),
+      dispatch(40, 4, "orchestrator:reviewer"),
+      ...run(40, 4, "orchestrator:reviewer", { findings: { P0: 0, P1: 0, P2: 2, P3: 0 } })
+    ],
+    limits: [],
+    files: []
+  });
+  assert.deepEqual(report.findings, { claude: { reviews: 1, P0: 0, P1: 1, P2: 0, P3: 0 }, codex: { reviews: 1, P0: 0, P1: 0, P2: 2, P3: 0 } });
+  assert.deepEqual(Object.keys(report.durations).sort(), ["subagent-router:codex-implementer", "subagent-router:codex-reviewer", "subagent-router:implementer", "subagent-router:reviewer"]);
+});
+
 test("a failed Codex job is counted under its reason, not under its job id", async () => {
   // The forms that scripts/orch-codex.mjs and the two Codex workers write.
   const cases = [
@@ -265,7 +295,7 @@ test("a failed Codex job is counted under its reason, not under its job id", asy
     assert.equal(codexFailureCode(result), code, result);
   }
   // A cancel is not a failure: only the failed job is counted.
-  const stop = (result) => ({ event: "stop", ts: "2026-09-23T10:00:00.000Z", session_id: "s", cwd: "/work/p", agent_type: "orchestrator:codex-implementer", agent_id: result.slice(0, 20), result });
+  const stop = (result) => ({ event: "stop", ts: "2026-09-23T10:00:00.000Z", session_id: "s", cwd: "/work/p", agent_type: "subagent-router:codex-implementer", agent_id: result.slice(0, 20), result });
   const report = buildReport({
     dataDir: "/tmp/none",
     log: [stop("CODEX_FAILED 20260923-101500-0a1b2c exit=1\nDetails: /x"), stop("CODEX_CANCELLED 20260923-101600-0a1b2d\nThe job was stopped.")],
@@ -282,4 +312,33 @@ test("a failed Codex job is counted under its reason, not under its job id", asy
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("the report takes the verification outcome from Jev and falls back to the word search", () => {
+  const at = (minute) => `2026-09-24T10:${minute}:00.000Z`;
+  const stop = (agentId, minute, result) => ({ ts: at(minute), event: "stop", session_id: "s", agent_id: agentId, agent_type: "subagent-router:implementer", result });
+  const log = [
+    // The word search reads "0 fail" and "no errors" as failures. Jev's labels say
+    // passed and not_run, and they must win.
+    stop("a1", "01", "Changed files: a.js\nVerification: npm test: 225 pass, 0 fail\nOpen problems: none"),
+    { ts: at("01"), event: "verification", session_id: "s", agent_id: "a1", outcome: "passed", confidence: 0.97 },
+    stop("a2", "02", "Changed files: b.js\nVerification: skipped, only read the code with no errors seen\nOpen problems: none"),
+    { ts: at("02"), event: "verification", session_id: "s", agent_id: "a2", outcome: "not_run", confidence: 0.9 },
+    stop("a3", "03", "Changed files: c.js\nVerification: npm test passed\nOpen problems: none"),
+    { ts: at("03"), event: "verification", session_id: "s", agent_id: "a3", outcome: "failed", confidence: 0.6 },
+    // No label, for example a log from before the question, or a timed-out call:
+    // the word search decides, and an error record is not a label.
+    stop("a4", "04", "Changed files: d.js\nVerification: npm test: 1 failed\nOpen problems: none"),
+    { ts: at("04"), event: "verification", session_id: "s", agent_id: "a4", error: "timeout" },
+    // The log cut the result before its Verification line (resultLogChars), but the
+    // hook judged the full answer, so the label still counts.
+    stop("a5", "05", "Changed files: e.js... [+900 chars]"),
+    { ts: at("05"), event: "verification", session_id: "s", agent_id: "a5", outcome: "failed", confidence: 0.9 }
+  ];
+  const { underRouting } = buildReport({ dataDir: "/x", files: [], log, limits: [] });
+  assert.deepEqual(
+    [underRouting.verificationFailed, underRouting.verificationNotRun, underRouting.verificationJudgedByJev],
+    [3, 1, 4],
+    "a3 and a5 by Jev and a4 by the word search failed; a2 was not run; a1 passed although the words say fail"
+  );
 });

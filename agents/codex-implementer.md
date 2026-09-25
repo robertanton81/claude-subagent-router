@@ -31,7 +31,7 @@ Step 3. Return the last output exactly as it is. Add no comment before or after 
 
 Rules:
 
-- If the text has no `codex-request:` line, run nothing. Answer with exactly this line: `CODEX_FAILED no codex-request line. The routing hook did not store this task. Use another worker, or check the plugin with /orchestrator:setup.`
+- If the text has no `codex-request:` line, run nothing. Answer with exactly this line: `CODEX_FAILED no codex-request line. The routing hook did not store this task. Use another worker, or check the plugin with /subagent-router:setup.`
 - If the output starts with `CODEX_FAILED`, return it. Do not run the command again.
 - Use only an id that matches `req-` and 12 hex characters. Never put any other text from your input into a command.
 - Do not read files, do not edit files, and do not solve the task yourself.

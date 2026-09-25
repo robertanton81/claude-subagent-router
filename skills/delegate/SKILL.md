@@ -1,9 +1,9 @@
 ---
 name: delegate
-description: Brief and result formats for the orchestrator workers, and the rules for when to delegate. Use before you hand a task to an orchestrator worker (searcher, implementer, debugger, reviewer, codex-implementer, codex-reviewer).
+description: Brief and result formats for the subagent-router workers, and the rules for when to delegate. Use before you hand a task to a subagent-router worker (searcher, implementer, debugger, reviewer, codex-implementer, codex-reviewer).
 ---
 
-# Delegate work to an orchestrator worker
+# Delegate work to a subagent-router worker
 
 ## When to delegate
 
@@ -34,7 +34,7 @@ review-scope: <uncommitted | base:<branch> | commit:<hash> | custom>
 
 Codex refuses review instructions together with a scope. With `uncommitted`, `base:` and `commit:`, Codex reviews that diff with its own rules and does not read the brief. With `custom`, Codex reads the brief as its instructions, so the brief must name what to review.
 
-A direct call to `orchestrator:codex-reviewer` without a scope line reviews the uncommitted changes, and the brief is not read. Write `review-scope:` when you mean something else. When the routing hook moves a review brief from `orchestrator:reviewer` to Codex, it uses `custom`, so the brief is not lost.
+A direct call to `subagent-router:codex-reviewer` without a scope line reviews the uncommitted changes, and the brief is not read. Write `review-scope:` when you mean something else. When the routing hook moves a review brief from `subagent-router:reviewer` to Codex, it uses `custom`, so the brief is not lost.
 
 Optional line for every agent type:
 
@@ -63,10 +63,10 @@ Reviewers add findings in this form, the most serious first:
 
 ## Review
 
-Codex is opt-in. While it is off, the session start text says so, and every review goes to `orchestrator:reviewer`.
+Codex is opt-in. While it is off, the session start text says so, and every review goes to `subagent-router:reviewer`.
 
 - Review once per logical piece of work, not after every edit.
-- The reviewer comes from the other model family than the author. Changes from Claude workers or from the main session go to `orchestrator:codex-reviewer`. Changes from `orchestrator:codex-implementer` go to `orchestrator:reviewer`.
+- The reviewer comes from the other model family than the author. Changes from Claude workers or from the main session go to `subagent-router:codex-reviewer`. Changes from `subagent-router:codex-implementer` go to `subagent-router:reviewer`.
 - A finding can be wrong. Check it against the code before you act on it.
 - A clean review is not proof that the change is correct.
 

@@ -1,6 +1,6 @@
 ---
 name: configure
-description: Sets up the orchestrator plugin's settings by asking the user what they want, then writing ~/.claude/orchestrator/config.json. Use when the user asks to configure, set up or change the plugin's settings, when they ask what a setting does, or when the session start said no settings file exists yet.
+description: Sets up the subagent-router plugin's settings by asking the user what they want, then writing ~/.claude/orchestrator/config.json. Use when the user asks to configure, set up or change the plugin's settings, when they ask what a setting does, or when the session start said no settings file exists yet.
 allowed-tools: Bash(node:*)
 argument-hint: "[a setting to change, for example \"turn Codex off\"]"
 ---
@@ -21,7 +21,7 @@ If the user named a change in their message, for example "turn Codex off", make 
 
 Ask **one question at a time** and wait for the answer before the next one. Skip any question the user has already answered. Six questions cover what matters; the rest of the settings are fine at their defaults.
 
-1. **Jev.** The routing needs Jev, a classifier on TypeSafe's paid API (about $0.00005 per call). While it is on, the brief of each routed subagent call goes to TypeSafe, and briefs can hold code. It is off until the user says yes; then set `jevEnabled=true`. If they say no, the plugin's workers still run on the models of their agent files, and the question about agents that must keep their model does not matter.
+1. **Jev.** The routing needs Jev, a classifier on TypeSafe's paid API (about $0.00005 per call). While it is on, the brief of each routed subagent call goes to TypeSafe, and briefs can hold code. So does the `Verification:` part of each answer from the plugin's own workers, which can quote test output. It is off until the user says yes; then set `jevEnabled=true`. If they say no, the plugin's workers still run on the models of their agent files, and the question about agents that must keep their model does not matter.
 2. **Codex.** Does the user want the plugin to use the Codex CLI as well as Claude? It is off until they say yes, and it needs the Codex CLI installed and logged in. If they say no, skip questions about credits.
 3. **Credits**, only if Codex is on. When the weekly Codex allowance is used up, Codex keeps working and charges bought credits. The plugin refuses that by default. Ask whether a job may spend credits. Say plainly that this is real money, unlike the two subscriptions.
 4. **Mode.** `enforce` lets the hook change a route. `shadow` asks the classifier and writes down what it would have done, changing nothing. Recommend `shadow` for the first day to anyone who wants to see the decisions before trusting them, and `enforce` otherwise.
@@ -55,4 +55,4 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/setup-check.mjs"
 
 ## The classifier key is not a setting
 
-The key does not belong in this file, and it must never be typed into the conversation: anything in a transcript has to be treated as exposed. If Jev is on and the setup check reports a missing key, tell the user to copy the key and run this in their own terminal, adding the `--scope` of their install: `k=$(pbpaste) && claude plugin install orchestrator@llm-orchestrator --config "typesafe_api_key=$k"; unset k; pbcopy </dev/null`. It reads the key from the clipboard, so the key is never typed or kept in the shell history. Claude Code keeps it in the Keychain or its credentials file. Then run the check again. Do not ask them to paste it, do not write it anywhere yourself, and never suggest a `.env` file in the project.
+The key does not belong in this file, and it must never be typed into the conversation: anything in a transcript has to be treated as exposed. If Jev is on and the setup check reports a missing key, tell the user to copy the key and run this in their own terminal, adding the `--scope` of their install: `k=$(pbpaste) && claude plugin install subagent-router@claude-subagent-router --config "typesafe_api_key=$k"; unset k; pbcopy </dev/null`. It reads the key from the clipboard, so the key is never typed or kept in the shell history. Claude Code keeps it in the Keychain or its credentials file. Then run the check again. Do not ask them to paste it, do not write it anywhere yourself, and never suggest a `.env` file in the project.

@@ -1,4 +1,4 @@
-# Orchestrator plugin: save the rate limit values for the routing hook.
+# subagent-router plugin: save the rate limit values for the routing hook.
 #
 # Paste these lines into your status line script, after the place where it reads
 # the rate limit fields. They expect these variables, all of them optional:

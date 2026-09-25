@@ -33,7 +33,7 @@ export function logMaxBytes(env = process.env) {
   if (Number.isFinite(bytes) && bytes >= MIN_LOG_MAX_BYTES) {
     return Math.floor(bytes);
   }
-  process.stderr.write(`orchestrator: ORCH_LOG_MAX_BYTES="${raw}" is not a number of ${MIN_LOG_MAX_BYTES} or more, so ${DEFAULT_LOG_MAX_BYTES} is used\n`);
+  process.stderr.write(`subagent-router: ORCH_LOG_MAX_BYTES="${raw}" is not a number of ${MIN_LOG_MAX_BYTES} or more, so ${DEFAULT_LOG_MAX_BYTES} is used\n`);
   return DEFAULT_LOG_MAX_BYTES;
 }
 
@@ -236,14 +236,14 @@ export function appendLog(record, env = process.env) {
     try {
       rotateIfLarge(file, logMaxBytes(env));
     } catch (error) {
-      process.stderr.write(`orchestrator: cannot rotate the dispatch log: ${error.message}\n`);
+      process.stderr.write(`subagent-router: cannot rotate the dispatch log: ${error.message}\n`);
     }
     fs.appendFileSync(file, `${withoutSecrets(JSON.stringify(record))}\n`, { encoding: "utf8", mode: 0o600 });
     // The mode above counts only for a new file. An older file may be wider.
     makeFilePrivate(file);
     return true;
   } catch (error) {
-    process.stderr.write(`orchestrator: cannot write the dispatch log: ${error.message}\n`);
+    process.stderr.write(`subagent-router: cannot write the dispatch log: ${error.message}\n`);
     return false;
   }
 }

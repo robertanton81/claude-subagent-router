@@ -1,4 +1,4 @@
-import { buildRequest } from "./questions.mjs";
+import { VERIFICATION_OUTCOMES, buildRequest, buildVerificationRequest } from "./questions.mjs";
 
 // An error with a short code that is safe to log. It never holds the key.
 export class JevError extends Error {
@@ -63,8 +63,9 @@ export function readAnswers(body) {
   };
 }
 
-// Sends one request with all four questions. Throws a JevError on every failure.
-export async function askJev(brief, config, key) {
+// Sends one request to TypeSafe and returns { body, latencyMs }. Throws a
+// JevError on every failure. `timeoutMs` covers the answer and its body.
+async function postJev(request, config, key, timeoutMs = config.jevTimeoutMs) {
   const started = Date.now();
   let response;
   try {
@@ -74,12 +75,12 @@ export async function askJev(brief, config, key) {
         Authorization: `Bearer ${key}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(buildRequest(brief, config)),
-      signal: AbortSignal.timeout(config.jevTimeoutMs)
+      body: JSON.stringify(request),
+      signal: AbortSignal.timeout(timeoutMs)
     });
   } catch (error) {
     const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
-    throw new JevError(timedOut ? "timeout" : "network", timedOut ? `${config.jevTimeoutMs} ms` : error?.cause?.code ?? error?.name);
+    throw new JevError(timedOut ? "timeout" : "network", timedOut ? `${timeoutMs} ms` : error?.cause?.code ?? error?.name);
   }
   if (!response.ok) {
     // The start of the error body often says which field of the request was wrong.
@@ -99,12 +100,30 @@ export async function askJev(brief, config, key) {
   } catch (error) {
     // The time limit also covers the body, so a stalled body ends here as a timeout.
     const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
-    throw new JevError(timedOut ? "timeout" : "bad_response", timedOut ? `${config.jevTimeoutMs} ms while reading the body` : "the body is not JSON");
+    throw new JevError(timedOut ? "timeout" : "bad_response", timedOut ? `${timeoutMs} ms while reading the body` : "the body is not JSON");
   }
+  return { body, latencyMs: Date.now() - started };
+}
+
+// Sends one request with the routing questions. Throws a JevError on every failure.
+export async function askJev(brief, config, key) {
+  const { body, latencyMs } = await postJev(buildRequest(brief, config), config, key);
   return {
     answers: readAnswers(body),
-    latencyMs: Date.now() - started,
+    latencyMs,
     usage: body.usage ?? null,
     model: body.model ?? null
   };
+}
+
+// Asks how the checks of a finished worker ended. Returns { outcome,
+// confidence, latencyMs, usage, model }. Throws a JevError on every failure,
+// also for an outcome that is not one of VERIFICATION_OUTCOMES.
+export async function askVerification(text, config, key, timeoutMs) {
+  const { body, latencyMs } = await postJev(buildVerificationRequest(text, config), config, key, timeoutMs);
+  const answer = body?.answers?.outcome;
+  if (!VERIFICATION_OUTCOMES.includes(answer?.choice) || !isNumber(answer?.confidence)) {
+    throw new JevError("bad_response", "the outcome answer is missing or not a known outcome");
+  }
+  return { outcome: answer.choice, confidence: answer.confidence, latencyMs, usage: body.usage ?? null, model: body.model ?? null };
 }

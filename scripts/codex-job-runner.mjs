@@ -121,7 +121,7 @@ function finish(code, note) {
   }
   if (note) {
     try {
-      fs.appendFileSync(path.join(jobDir, "stderr.log"), `\norchestrator runner: ${note}\n`, { mode: 0o600 });
+      fs.appendFileSync(path.join(jobDir, "stderr.log"), `\nsubagent-router runner: ${note}\n`, { mode: 0o600 });
     } catch (error) {
       process.stderr.write(`the note could not be written: ${error.message}. The note was: ${note}\n`);
     }
@@ -211,8 +211,8 @@ try {
     // The hook moves Codex tasks to Claude only in enforce mode. This check holds in every mode.
     finish(
       78,
-      "Codex is off in the orchestrator plugin, so this job was not started. " +
-        "Send the task to a Claude worker: orchestrator:implementer, or orchestrator:reviewer for a review. " +
+      "Codex is off in the subagent-router plugin, so this job was not started. " +
+        "Send the task to a Claude worker: subagent-router:implementer, or subagent-router:reviewer for a review. " +
         'To use Codex, set "codexEnabled": true in ~/.claude/orchestrator/config.json.'
     );
   } else if (login.error) {
@@ -223,7 +223,7 @@ try {
       75,
       `The weekly Codex allowance of the ChatGPT plan is used up until ${describeTime(limits.resetsAt)}, so this job was not started. ` +
         `Codex would pay for it from bought credits (balance ${limits.creditsBalance ?? "unknown"}). ` +
-        "Send the task to a Claude worker: orchestrator:implementer, or orchestrator:reviewer for a review. " +
+        "Send the task to a Claude worker: subagent-router:implementer, or subagent-router:reviewer for a review. " +
         'To allow credits, set "codexSpendCredits": true in ~/.claude/orchestrator/config.json.'
     );
   } else if (pausedUntil && !config.codexSpendCredits) {
@@ -231,7 +231,7 @@ try {
       75,
       `An earlier Codex job failed with a usage limit, so Codex is paused until ${describeTime(pausedUntil)}. ` +
         "This job was not started, because before that time a run would most likely be paid from bought credits. " +
-        "Send the task to a Claude worker: orchestrator:implementer, or orchestrator:reviewer for a review. " +
+        "Send the task to a Claude worker: subagent-router:implementer, or subagent-router:reviewer for a review. " +
         "To end the pause early, delete ~/.claude/orchestrator/codex-unavailable.json. " +
         'To allow credits, set "codexSpendCredits": true in ~/.claude/orchestrator/config.json.'
     );

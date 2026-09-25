@@ -33,7 +33,7 @@ test("the completeness rule watches without changing the route, and the record s
     assert.equal(sent.model, "haiku", "the rule only watches, so the call still goes to the small model");
 
     const [record] = readLog(tempDir);
-    assert.deepEqual(record.would_route, { agent: "orchestrator:complete-searcher", model: "sonnet", reason: "needs_every_match" });
+    assert.deepEqual(record.would_route, { agent: "subagent-router:complete-searcher", model: "sonnet", reason: "needs_every_match" });
     assert.deepEqual([record.action, record.final.model], ["rewrite", "haiku"]);
     assert.equal(record.jev.needsEveryMatch, 0.92, "the answer is logged whether or not it changes anything");
   });
@@ -42,7 +42,7 @@ test("the completeness rule watches without changing the route, and the record s
   await withJev({ body: jevBody({ kind: "search", writes: 0.03, needsEveryMatch: 0.92 }) }, async ({ tempDir, env }) => {
     const result = await runNode(HOOK, { stdin: agentCall(), env: { ...env, ORCH_COMPLETE_RULE: "enforce" } });
     const sent = JSON.parse(result.stdout).hookSpecificOutput.updatedInput;
-    assert.deepEqual([sent.subagent_type, sent.model], ["orchestrator:complete-searcher", "sonnet"]);
+    assert.deepEqual([sent.subagent_type, sent.model], ["subagent-router:complete-searcher", "sonnet"]);
     const [record] = readLog(tempDir);
     assert.equal(record.would_route, undefined, "a rule in force records no shadow");
     assert.equal(record.reason, "needs_every_match");
@@ -51,11 +51,11 @@ test("the completeness rule watches without changing the route, and the record s
   // The orchestrator asked for the complete searcher itself. Jev sees a plain
   // search and the rule only watches, yet the call is not moved to the small model.
   await withJev({ body: jevBody({ kind: "search", writes: 0.03, needsEveryMatch: 0.1 }) }, async ({ tempDir, env }) => {
-    const result = await runNode(HOOK, { stdin: agentCall({ tool_input: { description: "List dirs", prompt: "List every directory under lib.", subagent_type: "orchestrator:complete-searcher" } }), env });
+    const result = await runNode(HOOK, { stdin: agentCall({ tool_input: { description: "List dirs", prompt: "List every directory under lib.", subagent_type: "subagent-router:complete-searcher" } }), env });
     assert.equal(result.code, 0);
     assert.equal(result.stdout.trim(), "", "a kept call is passed on unchanged");
     const [record] = readLog(tempDir);
-    assert.deepEqual([record.action, record.reason, record.final.agent], ["agree", "complete_requested", "orchestrator:complete-searcher"]);
+    assert.deepEqual([record.action, record.reason, record.final.agent], ["agree", "complete_requested", "subagent-router:complete-searcher"]);
   });
 
   // A search that need not be complete is untouched by the rule either way.
@@ -90,23 +90,23 @@ test("a confident answer rewrites the worker and the model, and keeps every othe
     assert.deepEqual(output.updatedInput, {
       description: "Add retry",
       prompt: "Goal: add a retry to the fetch helper.",
-      subagent_type: "orchestrator:searcher",
+      subagent_type: "subagent-router:searcher",
       run_in_background: true,
       model: "haiku"
     });
-    assert.match(output.additionalContext, /orchestrator:searcher/);
+    assert.match(output.additionalContext, /subagent-router:searcher/);
 
     // Jev gets the brief only. It must not see the worker that was asked for.
     const request = jev.state.requests[0];
     assert.equal(request.headers.authorization, `Bearer ${TEST_KEY}`);
     assert.deepEqual(Object.keys(request.body.state.brief), ["description", "task"]);
-    assert.ok(!JSON.stringify(request.body).includes("orchestrator:implementer"));
+    assert.ok(!JSON.stringify(request.body).includes("subagent-router:implementer"));
 
     const [record] = readLog(tempDir);
     assert.equal(record.action, "rewrite");
     assert.equal(record.cwd, "/work/project", "the project folder is on every record, because one log serves every project");
-    assert.deepEqual(record.requested, { agent: "orchestrator:implementer", model: null });
-    assert.deepEqual(record.final, { agent: "orchestrator:searcher", model: "haiku" });
+    assert.deepEqual(record.requested, { agent: "subagent-router:implementer", model: null });
+    assert.deepEqual(record.final, { agent: "subagent-router:searcher", model: "haiku" });
     assert.equal(record.jev.kind, "search");
     assert.equal(record.jev.key_source, "env");
     assert.ok(!JSON.stringify(record).includes(TEST_KEY), "the key must never reach the log");
@@ -146,8 +146,8 @@ test("shadow mode logs the route and changes nothing", async () => {
     assert.equal(result.stdout, "");
     const [record] = readLog(tempDir);
     assert.equal(record.action, "shadow");
-    assert.equal(record.route.agent, "orchestrator:searcher");
-    assert.deepEqual(record.final, { agent: "orchestrator:implementer", model: null });
+    assert.equal(record.route.agent, "subagent-router:searcher");
+    assert.deepEqual(record.final, { agent: "subagent-router:implementer", model: null });
   });
 });
 
@@ -337,7 +337,7 @@ test("the line orch-route: keep runs a call as written, for our workers and for 
   await withJev({ body: jevBody({ kind: "implement", difficulty: 1 }) }, async ({ jev, tempDir, env }) => {
     const retry = "Goal: add a retry to the fetch helper.\n  Orch-Route: KEEP  \nVerify: npm test";
     const calls = [
-      otherAgentCall("orchestrator:implementer", { model: "opus", prompt: retry }),
+      otherAgentCall("subagent-router:implementer", { model: "opus", prompt: retry }),
       otherAgentCall("dotnet-implementer", { model: "opus", prompt: retry }, { tool_use_id: "toolu_2" })
     ];
     for (const call of calls) {
@@ -369,7 +369,7 @@ test("codex-rescue is redirected to our Codex worker without a Jev call", async 
     call.tool_input.subagent_type = "codex:codex-rescue";
     const result = await runNode(HOOK, { stdin: JSON.stringify(call), env });
     const updated = JSON.parse(result.stdout).hookSpecificOutput.updatedInput;
-    assert.deepEqual([updated.subagent_type, updated.model], ["orchestrator:codex-implementer", "haiku"]);
+    assert.deepEqual([updated.subagent_type, updated.model], ["subagent-router:codex-implementer", "haiku"]);
     assert.match(updated.prompt, /^codex-request: req-[0-9a-f]{12}\n/);
     assert.equal(jev.state.requests.length, 0);
     assert.equal(readLog(tempDir)[0].action, "redirect");
@@ -446,7 +446,7 @@ test("with Jev off by default, no brief goes to TypeSafe, even when a key exists
 test("with Jev off, a direct call to a Codex worker still gets a request id", async () => {
   await withJev({ body: jevBody() }, async ({ jev, env }) => {
     const call = JSON.parse(agentCall());
-    call.tool_input.subagent_type = "orchestrator:codex-implementer";
+    call.tool_input.subagent_type = "subagent-router:codex-implementer";
     const result = await runNode(HOOK, { stdin: JSON.stringify(call), env: { ...env, ORCH_JEV_ENABLED: "" } });
     assert.match(JSON.parse(result.stdout).hookSpecificOutput.updatedInput.prompt, /^codex-request: req-[0-9a-f]{12}\n/);
     assert.equal(jev.state.requests.length, 0);
@@ -457,15 +457,15 @@ test("a review after a Codex change goes to the Claude reviewer", async () => {
   await withJev({ body: jevBody({ kind: "implement", difficulty: 2.4 }) }, async ({ jev, tempDir, env }) => {
     // First dispatch: a hard task that the table sends to Codex.
     await runNode(HOOK, { stdin: agentCall(), env });
-    assert.equal(readLog(tempDir)[0].final.agent, "orchestrator:codex-implementer");
+    assert.equal(readLog(tempDir)[0].final.agent, "subagent-router:codex-implementer");
 
     // Second dispatch in the same session: a review request for the Codex reviewer.
     jev.state.reply = { body: jevBody({ kind: "review", writes: 0.02 }) };
     const review = JSON.parse(agentCall({ tool_use_id: "toolu_2" }));
-    review.tool_input.subagent_type = "orchestrator:codex-reviewer";
+    review.tool_input.subagent_type = "subagent-router:codex-reviewer";
     const result = await runNode(HOOK, { stdin: JSON.stringify(review), env });
     const updated = JSON.parse(result.stdout).hookSpecificOutput.updatedInput;
-    assert.deepEqual([updated.subagent_type, updated.model], ["orchestrator:reviewer", "sonnet"]);
+    assert.deepEqual([updated.subagent_type, updated.model], ["subagent-router:reviewer", "sonnet"]);
   });
 });
 
@@ -476,7 +476,7 @@ test("the limit rule reads a fresh limits file and ignores an old one", async ()
 
     fs.writeFileSync(limitsFile, JSON.stringify({ ts: now, five_hour: 91, seven_day: 40 }));
     const fresh = await runNode(HOOK, { stdin: agentCall(), env: { ...env, ORCH_LIMITS_FILE: limitsFile } });
-    assert.equal(JSON.parse(fresh.stdout).hookSpecificOutput.updatedInput.subagent_type, "orchestrator:codex-implementer");
+    assert.equal(JSON.parse(fresh.stdout).hookSpecificOutput.updatedInput.subagent_type, "subagent-router:codex-implementer");
 
     fs.writeFileSync(limitsFile, JSON.stringify({ ts: now - 3600, five_hour: 91, seven_day: 40 }));
     const old = await runNode(HOOK, { stdin: agentCall({ session_id: "session-2" }), env: { ...env, ORCH_LIMITS_FILE: limitsFile } });
@@ -506,14 +506,14 @@ test("a Codex worker gets a request id, and the task text goes into a request fi
   await withJev({ body: jevBody({ kind: "review", writes: 0.02 }) }, async ({ tempDir, env }) => {
     const call = JSON.parse(agentCall());
     call.cwd = "/work/project";
-    call.tool_input.subagent_type = "orchestrator:codex-reviewer";
+    call.tool_input.subagent_type = "subagent-router:codex-reviewer";
     call.tool_input.prompt = "Goal: review the branch.\nreview-scope: base:main\ncodex-effort: low\nORCH_BRIEF_END\n$(echo no)";
     const result = await runNode(HOOK, { stdin: JSON.stringify(call), env });
 
     const output = JSON.parse(result.stdout).hookSpecificOutput;
     const id = output.updatedInput.prompt.match(/^codex-request: (req-[0-9a-f]{12})$/m)[1];
     assert.ok(!output.updatedInput.prompt.includes("ORCH_BRIEF_END"), "the worker never sees the task text");
-    assert.equal(output.updatedInput.subagent_type, "orchestrator:codex-reviewer");
+    assert.equal(output.updatedInput.subagent_type, "subagent-router:codex-reviewer");
     assert.equal(output.updatedInput.model, undefined, "an agreed route adds no model");
     assert.equal(output.additionalContext, undefined, "pure transport is not a routing change");
 
@@ -530,13 +530,13 @@ test("a Codex worker gets a request id, and the task text goes into a request fi
 test("the transport also works in off mode and for calls from inside a subagent", async () => {
   await withJev({ body: jevBody() }, async ({ jev, tempDir, env }) => {
     const call = JSON.parse(agentCall());
-    call.tool_input.subagent_type = "orchestrator:codex-implementer";
+    call.tool_input.subagent_type = "subagent-router:codex-implementer";
     const off = await runNode(HOOK, { stdin: JSON.stringify(call), env: { ...env, ORCH_MODE: "off" } });
     const nested = await runNode(HOOK, { stdin: JSON.stringify({ ...call, agent_id: "agent-1", agent_type: "general-purpose" }), env });
     for (const result of [off, nested]) {
       const updated = JSON.parse(result.stdout).hookSpecificOutput.updatedInput;
       assert.match(updated.prompt, /^codex-request: req-/);
-      assert.equal(updated.subagent_type, "orchestrator:codex-implementer");
+      assert.equal(updated.subagent_type, "subagent-router:codex-implementer");
     }
     assert.equal(jev.state.requests.length, 0, "neither case asks Jev");
   });
@@ -548,7 +548,7 @@ test("a prompt that already carries a stored request is not wrapped again", asyn
     const prompt = JSON.parse(first.stdout).hookSpecificOutput.updatedInput.prompt;
 
     const again = JSON.parse(agentCall({ tool_use_id: "toolu_2" }));
-    again.tool_input.subagent_type = "orchestrator:codex-implementer";
+    again.tool_input.subagent_type = "subagent-router:codex-implementer";
     again.tool_input.prompt = prompt;
     const second = await runNode(HOOK, { stdin: JSON.stringify(again), env: { ...env, ORCH_MODE: "off" } });
     assert.equal(second.stdout, "");
@@ -561,14 +561,14 @@ test("a review after a failed Codex attempt still goes to Codex, because Claude 
     // The hard task goes to Codex, and Codex fails without a change.
     await runNode(HOOK, { stdin: agentCall(), env });
     const log = "scripts/log-hook.mjs";
-    await runNode(log, { env, stdin: JSON.stringify({ hook_event_name: "PostToolUse", session_id: "session-1", tool_name: "Agent", tool_use_id: "toolu_1", tool_input: { subagent_type: "orchestrator:codex-implementer", model: "haiku" }, tool_response: { status: "async_launched", agentId: "a1" } }) });
-    await runNode(log, { env, stdin: JSON.stringify({ hook_event_name: "SubagentStop", session_id: "session-1", agent_id: "a1", agent_type: "orchestrator:codex-implementer", last_assistant_message: "CODEX_FAILED 20260101-000000-abcdef exit=1" }) });
+    await runNode(log, { env, stdin: JSON.stringify({ hook_event_name: "PostToolUse", session_id: "session-1", tool_name: "Agent", tool_use_id: "toolu_1", tool_input: { subagent_type: "subagent-router:codex-implementer", model: "haiku" }, tool_response: { status: "async_launched", agentId: "a1" } }) });
+    await runNode(log, { env, stdin: JSON.stringify({ hook_event_name: "SubagentStop", session_id: "session-1", agent_id: "a1", agent_type: "subagent-router:codex-implementer", last_assistant_message: "CODEX_FAILED 20260101-000000-abcdef exit=1" }) });
 
     jev.state.reply = { body: jevBody({ kind: "review", writes: 0.02 }) };
     const review = JSON.parse(agentCall({ tool_use_id: "toolu_2" }));
-    review.tool_input.subagent_type = "orchestrator:reviewer";
+    review.tool_input.subagent_type = "subagent-router:reviewer";
     const result = await runNode(HOOK, { stdin: JSON.stringify(review), env });
-    assert.equal(JSON.parse(result.stdout).hookSpecificOutput.updatedInput.subagent_type, "orchestrator:codex-reviewer");
+    assert.equal(JSON.parse(result.stdout).hookSpecificOutput.updatedInput.subagent_type, "subagent-router:codex-reviewer");
   });
 });
 
@@ -667,9 +667,9 @@ test("while Codex has no capacity, reviews and hard tasks stay on Claude", async
     markCodexUnavailable("You've hit your usage limit.", { ORCH_DATA_DIR: env.ORCH_DATA_DIR });
 
     const review = JSON.parse(agentCall());
-    review.tool_input.subagent_type = "orchestrator:codex-reviewer";
+    review.tool_input.subagent_type = "subagent-router:codex-reviewer";
     const reviewResult = await runNode(HOOK, { stdin: JSON.stringify(review), env });
-    assert.equal(JSON.parse(reviewResult.stdout).hookSpecificOutput.updatedInput.subagent_type, "orchestrator:reviewer");
+    assert.equal(JSON.parse(reviewResult.stdout).hookSpecificOutput.updatedInput.subagent_type, "subagent-router:reviewer");
 
     jev.state.reply = { body: jevBody({ kind: "implement", difficulty: 2.6 }) };
     const hard = await runNode(HOOK, { stdin: agentCall({ tool_use_id: "toolu_2" }), env });
@@ -694,16 +694,16 @@ test("a direct call to a Codex worker falls back to Claude, and the user is told
     writeJson(path.join(tempDir, "data", "codex-limits.json"), { usedPercent: 100, resetsAt, creditsBalance: 57.8, hasCredits: true, ts: Date.now() });
 
     const call = JSON.parse(agentCall());
-    call.tool_input.subagent_type = "orchestrator:codex-implementer";
+    call.tool_input.subagent_type = "subagent-router:codex-implementer";
     const first = JSON.parse((await runNode(HOOK, { stdin: JSON.stringify(call), env })).stdout);
-    assert.deepEqual([first.hookSpecificOutput.updatedInput.subagent_type, first.hookSpecificOutput.updatedInput.model], ["orchestrator:implementer", "sonnet"]);
+    assert.deepEqual([first.hookSpecificOutput.updatedInput.subagent_type, first.hookSpecificOutput.updatedInput.model], ["subagent-router:implementer", "sonnet"]);
     assert.equal(first.hookSpecificOutput.updatedInput.prompt, call.tool_input.prompt, "a Claude worker gets the real task text");
     assert.match(first.systemMessage, /weekly Codex allowance[\s\S]*run on Claude workers/);
     assert.match(first.hookSpecificOutput.additionalContext, /codex_plan_used_up/);
 
     const second = JSON.parse((await runNode(HOOK, { stdin: JSON.stringify({ ...call, tool_use_id: "toolu_2" }), env })).stdout);
     assert.equal(second.systemMessage, undefined, "one notice per session is enough");
-    assert.equal(second.hookSpecificOutput.updatedInput.subagent_type, "orchestrator:implementer");
+    assert.equal(second.hookSpecificOutput.updatedInput.subagent_type, "subagent-router:implementer");
 
     const otherSession = JSON.parse((await runNode(HOOK, { stdin: JSON.stringify({ ...call, session_id: "session-2" }), env })).stdout);
     assert.ok(otherSession.systemMessage, "a new session is told again");
@@ -718,14 +718,14 @@ test("with codexSpendCredits the used-up plan does not stop Codex, and shadow mo
   await withJev({ body: jevBody({ kind: "implement", confidence: 0.3 }) }, async ({ tempDir, env }) => {
     writeJson(path.join(tempDir, "data", "codex-limits.json"), { usedPercent: 100, resetsAt: Date.now() + 3600 * 1000, ts: Date.now() });
     const call = JSON.parse(agentCall());
-    call.tool_input.subagent_type = "orchestrator:codex-implementer";
+    call.tool_input.subagent_type = "subagent-router:codex-implementer";
 
     const shadow = JSON.parse((await runNode(HOOK, { stdin: JSON.stringify(call), env: { ...env, ORCH_MODE: "shadow" } })).stdout);
-    assert.equal(shadow.hookSpecificOutput.updatedInput.subagent_type, "orchestrator:codex-implementer");
+    assert.equal(shadow.hookSpecificOutput.updatedInput.subagent_type, "subagent-router:codex-implementer");
 
     writeJson(path.join(tempDir, "data", "config.json"), { codexSpendCredits: true });
     const allowed = JSON.parse((await runNode(HOOK, { stdin: JSON.stringify({ ...call, tool_use_id: "toolu_2" }), env })).stdout);
-    assert.equal(allowed.hookSpecificOutput.updatedInput.subagent_type, "orchestrator:codex-implementer");
+    assert.equal(allowed.hookSpecificOutput.updatedInput.subagent_type, "subagent-router:codex-implementer");
     assert.equal(allowed.systemMessage, undefined);
   });
 });
@@ -734,9 +734,9 @@ test("numbers from before the reset time say nothing, so Codex counts as availab
   await withJev({ body: jevBody({ kind: "implement", confidence: 0.3 }) }, async ({ tempDir, env }) => {
     writeJson(path.join(tempDir, "data", "codex-limits.json"), { usedPercent: 100, resetsAt: Date.now() - 1000, ts: Date.now() - 5000 });
     const call = JSON.parse(agentCall());
-    call.tool_input.subagent_type = "orchestrator:codex-implementer";
+    call.tool_input.subagent_type = "subagent-router:codex-implementer";
     const result = JSON.parse((await runNode(HOOK, { stdin: JSON.stringify(call), env })).stdout);
-    assert.equal(result.hookSpecificOutput.updatedInput.subagent_type, "orchestrator:codex-implementer");
+    assert.equal(result.hookSpecificOutput.updatedInput.subagent_type, "subagent-router:codex-implementer");
   });
 });
 
@@ -756,7 +756,7 @@ test("the pace rule moves work to Codex below the gate, tells the user why, and 
     // The same 50 percent after only 2 hours, so 3 hours left, is on pace for 125: tight.
     writeJson(limitsFile, { ts, five_hour: 50, seven_day: 10, five_hour_resets_at: ts + 3 * 3600, seven_day_resets_at: ts + sevenDays - 86400, session_id: "s" });
     const paced = JSON.parse((await runNode(HOOK, { stdin: agentCall({ session_id: "session-paced" }), env: withLimits })).stdout);
-    assert.equal(paced.hookSpecificOutput.updatedInput.subagent_type, "orchestrator:codex-implementer");
+    assert.equal(paced.hookSpecificOutput.updatedInput.subagent_type, "subagent-router:codex-implementer");
     assert.match(paced.systemMessage, /^Claude usage is at 50% of the 5-hour window and 10% of the 7-day window\. At this pace the 5-hour window runs out before it resets at .+ \(about 125% by then\)\. Tasks with a complete brief now run on Codex/);
     const pacedRecord = readLog(tempDir)[1];
     assert.deepEqual([pacedRecord.action, pacedRecord.reason, pacedRecord.claude.tight, pacedRecord.claude.reason], ["rewrite", "limit_rule", true, "pace"]);
@@ -778,7 +778,7 @@ test("high Claude usage moves complete tasks to Codex and tells the user once, u
     const withLimits = { ...env, ORCH_LIMITS_FILE: limitsFile };
 
     const first = JSON.parse((await runNode(HOOK, { stdin: agentCall(), env: withLimits })).stdout);
-    assert.equal(first.hookSpecificOutput.updatedInput.subagent_type, "orchestrator:codex-implementer");
+    assert.equal(first.hookSpecificOutput.updatedInput.subagent_type, "subagent-router:codex-implementer");
     assert.match(first.systemMessage, /Claude usage is at 86% of the 5-hour window and 54% of the 7-day window/);
 
     // Codex is tight as well: moving work there would only move the problem.
@@ -811,14 +811,14 @@ test("a call that the writer lock denies does not use up the notice about Codex"
     const endJob = holdWriterLock(env, project);
 
     const call = JSON.parse(agentCall({ cwd: project }));
-    call.tool_input.subagent_type = "orchestrator:codex-reviewer";
+    call.tool_input.subagent_type = "subagent-router:codex-reviewer";
     const denied = JSON.parse((await runNode(HOOK, { stdin: JSON.stringify(call), env })).stdout);
     assert.equal(denied.hookSpecificOutput.permissionDecision, "deny");
     assert.equal(denied.systemMessage, undefined, "the deny output shows no notice");
 
     endJob();
     const next = JSON.parse((await runNode(HOOK, { stdin: JSON.stringify({ ...call, tool_use_id: "toolu_2" }), env })).stdout);
-    assert.equal(next.hookSpecificOutput.updatedInput.subagent_type, "orchestrator:reviewer");
+    assert.equal(next.hookSpecificOutput.updatedInput.subagent_type, "subagent-router:reviewer");
     assert.match(next.systemMessage, /no capacity left[\s\S]*run on Claude workers/, "the first call that runs shows the notice");
 
     const [first, second] = readLog(tempDir);
@@ -842,7 +842,7 @@ test("a call that the writer lock denies does not use up the notice about Claude
 
     endJob();
     const next = JSON.parse((await runNode(HOOK, { stdin: agentCall({ cwd: project, tool_use_id: "toolu_2" }), env: withLimits })).stdout);
-    assert.equal(next.hookSpecificOutput.updatedInput.subagent_type, "orchestrator:codex-implementer");
+    assert.equal(next.hookSpecificOutput.updatedInput.subagent_type, "subagent-router:codex-implementer");
     assert.match(next.systemMessage, /Claude usage is at 86% of the 5-hour window/, "the first call that runs shows the notice");
   });
 });
@@ -879,7 +879,7 @@ test("an agent type of another owner is denied while a Codex job writes, when Je
     assert.equal(failed.action, "pass");
 
     // The plugin's own writer is still denied, and the folder is free once the job has ended.
-    assert.equal(JSON.parse((await runNode(HOOK, { stdin: call("orchestrator:implementer", "toolu_4"), env })).stdout).hookSpecificOutput.permissionDecision, "deny");
+    assert.equal(JSON.parse((await runNode(HOOK, { stdin: call("subagent-router:implementer", "toolu_4"), env })).stdout).hookSpecificOutput.permissionDecision, "deny");
     endJob();
     jev.state.reply = { body: jevBody({ kind: "implement", writes: 0.95 }) };
     const after = await runNode(HOOK, { stdin: call("general-purpose", "toolu_5"), env });
@@ -918,16 +918,16 @@ test("with Codex off, no task reaches Codex and codex-rescue passes unchanged", 
 
     jev.state.reply = { body: jevBody({ kind: "review", writes: 0.02 }) };
     const review = JSON.parse(agentCall({ tool_use_id: "toolu_2" }));
-    review.tool_input.subagent_type = "orchestrator:reviewer";
+    review.tool_input.subagent_type = "subagent-router:reviewer";
     const reviewResult = await runNode(HOOK, { stdin: JSON.stringify(review), env: offTight });
     assert.equal(reviewResult.stdout, "", "the review stays on the Claude reviewer, and the user is not told again and again that Codex is off");
 
     // Jev is not confident here, so only the fallback rule can move the task.
     jev.state.reply = { body: jevBody({ kind: "implement", confidence: 0.3 }) };
     const direct = JSON.parse(agentCall({ tool_use_id: "toolu_3" }));
-    direct.tool_input.subagent_type = "orchestrator:codex-implementer";
+    direct.tool_input.subagent_type = "subagent-router:codex-implementer";
     const directResult = JSON.parse((await runNode(HOOK, { stdin: JSON.stringify(direct), env: offTight })).stdout);
-    assert.equal(directResult.hookSpecificOutput.updatedInput.subagent_type, "orchestrator:implementer");
+    assert.equal(directResult.hookSpecificOutput.updatedInput.subagent_type, "subagent-router:implementer");
     assert.match(directResult.systemMessage, /^Codex is off, because "codexEnabled" is not true/);
     const again = JSON.parse((await runNode(HOOK, { stdin: JSON.stringify({ ...direct, tool_use_id: "toolu_4" }), env: offTight })).stdout);
     assert.equal(again.systemMessage, undefined, "one notice per session is enough");
@@ -936,9 +936,9 @@ test("with Codex off, no task reaches Codex and codex-rescue passes unchanged", 
     // It is still a call for Codex, so a new session is told.
     jev.state.reply = { body: jevBody({ kind: "review", writes: 0.02 }) };
     const directReview = JSON.parse(agentCall({ tool_use_id: "toolu_6", session_id: "session-2" }));
-    directReview.tool_input.subagent_type = "orchestrator:codex-reviewer";
+    directReview.tool_input.subagent_type = "subagent-router:codex-reviewer";
     const directReviewResult = JSON.parse((await runNode(HOOK, { stdin: JSON.stringify(directReview), env: off })).stdout);
-    assert.equal(directReviewResult.hookSpecificOutput.updatedInput.subagent_type, "orchestrator:reviewer");
+    assert.equal(directReviewResult.hookSpecificOutput.updatedInput.subagent_type, "subagent-router:reviewer");
     assert.match(directReviewResult.systemMessage, /^Codex is off/);
 
     const requestsBefore = jev.state.requests.length;
@@ -950,7 +950,7 @@ test("with Codex off, no task reaches Codex and codex-rescue passes unchanged", 
 
     const log = readLog(tempDir);
     assert.deepEqual(log.map((record) => record.reason), ["claude_tight", "codex_unavailable", "codex_disabled", "codex_disabled", "codex_unavailable", "codex_disabled"]);
-    assert.deepEqual([log[0].action, log[0].final], ["agree", { agent: "orchestrator:implementer", model: null }]);
+    assert.deepEqual([log[0].action, log[0].final], ["agree", { agent: "subagent-router:implementer", model: null }]);
     assert.deepEqual([log[0].codex.available, log[0].codex.reason], [false, "codex_disabled"]);
     assert.ok(!fs.existsSync(path.join(tempDir, "data", "codex-requests")), "no Codex request was stored");
   });
@@ -962,14 +962,14 @@ test("while Claude usage is high and Codex cannot take work, Opus becomes Sonnet
     writeJson(limitsFile, { ts: Math.floor(Date.now() / 1000), five_hour: 95, seven_day: 90 });
     const offTight = { ...env, ORCH_CODEX_ENABLED: "", ORCH_LIMITS_FILE: limitsFile };
     const debug = JSON.parse(agentCall());
-    debug.tool_input.subagent_type = "orchestrator:debugger";
+    debug.tool_input.subagent_type = "subagent-router:debugger";
 
     // The control: with free room the debugger keeps its model, so the hook prints nothing.
     const free = await runNode(HOOK, { stdin: JSON.stringify({ ...debug, session_id: "session-free" }), env: { ...env, ORCH_CODEX_ENABLED: "" } });
     assert.equal(free.stdout, "");
 
     const first = JSON.parse((await runNode(HOOK, { stdin: JSON.stringify(debug), env: offTight })).stdout);
-    assert.deepEqual([first.hookSpecificOutput.updatedInput.subagent_type, first.hookSpecificOutput.updatedInput.model], ["orchestrator:debugger", "sonnet"]);
+    assert.deepEqual([first.hookSpecificOutput.updatedInput.subagent_type, first.hookSpecificOutput.updatedInput.model], ["subagent-router:debugger", "sonnet"]);
     assert.match(first.systemMessage, /Claude usage is at 95% of the 5-hour window and 90% of the 7-day window\. Codex cannot take work, so tasks that would run on Opus now run on Sonnet/);
 
     // Another agent type gets the same upper limit, and one notice per session is enough.
@@ -997,27 +997,27 @@ test("a review that the hook moves to Codex keeps its brief as custom review ins
     const requestOf = (result) => readRequest(tempDir, JSON.parse(result.stdout).hookSpecificOutput.updatedInput.prompt.match(/^codex-request: (req-[0-9a-f]{12})$/m)[1]);
 
     // Asked for the Claude reviewer, moved to the Codex reviewer: the brief must not be lost.
-    const moved = await runNode(HOOK, { stdin: JSON.stringify(reviewCall("orchestrator:reviewer", "Goal: review the whole project for security problems.", "toolu_1")), env });
-    assert.equal(JSON.parse(moved.stdout).hookSpecificOutput.updatedInput.subagent_type, "orchestrator:codex-reviewer");
+    const moved = await runNode(HOOK, { stdin: JSON.stringify(reviewCall("subagent-router:reviewer", "Goal: review the whole project for security problems.", "toolu_1")), env });
+    assert.equal(JSON.parse(moved.stdout).hookSpecificOutput.updatedInput.subagent_type, "subagent-router:codex-reviewer");
     const movedRequest = requestOf(moved);
     assert.deepEqual([movedRequest.scope, movedRequest.scope_source], [{ type: "custom" }, "routing"]);
     assert.ok(sendsBriefToCodex({ kind: "review", scope: movedRequest.scope }), "Codex reads the brief");
     assert.equal(movedRequest.brief, "Goal: review the whole project for security problems.");
 
     // Asked for the Codex reviewer directly: the documented default stays, the uncommitted changes.
-    const direct = await runNode(HOOK, { stdin: JSON.stringify(reviewCall("orchestrator:codex-reviewer", "Goal: review my changes.", "toolu_2")), env });
+    const direct = await runNode(HOOK, { stdin: JSON.stringify(reviewCall("subagent-router:codex-reviewer", "Goal: review my changes.", "toolu_2")), env });
     const directRequest = requestOf(direct);
     assert.deepEqual([directRequest.scope, directRequest.scope_source], [{ type: "uncommitted" }, "default"]);
     assert.ok(!sendsBriefToCodex({ kind: "review", scope: directRequest.scope }));
 
     // A direct call whose only change is the model is not a move.
-    const modelOnly = await runNode(HOOK, { stdin: JSON.stringify(reviewCall("orchestrator:codex-reviewer", "Goal: review my changes.", "toolu_3", "sonnet")), env });
+    const modelOnly = await runNode(HOOK, { stdin: JSON.stringify(reviewCall("subagent-router:codex-reviewer", "Goal: review my changes.", "toolu_3", "sonnet")), env });
     assert.equal(JSON.parse(modelOnly.stdout).hookSpecificOutput.updatedInput.model, "haiku");
     assert.equal(requestOf(modelOnly).scope.type, "uncommitted");
 
     // A scope line in the brief wins over both defaults.
-    const scoped = await runNode(HOOK, { stdin: JSON.stringify(reviewCall("orchestrator:reviewer", "Goal: review the branch.\nreview-scope: base:main", "toolu_4")), env });
-    assert.equal(JSON.parse(scoped.stdout).hookSpecificOutput.updatedInput.subagent_type, "orchestrator:codex-reviewer");
+    const scoped = await runNode(HOOK, { stdin: JSON.stringify(reviewCall("subagent-router:reviewer", "Goal: review the branch.\nreview-scope: base:main", "toolu_4")), env });
+    assert.equal(JSON.parse(scoped.stdout).hookSpecificOutput.updatedInput.subagent_type, "subagent-router:codex-reviewer");
     assert.deepEqual([requestOf(scoped).scope, requestOf(scoped).scope_source], [{ type: "base", value: "main" }, "brief"]);
 
     assert.deepEqual(readLog(tempDir).map((record) => record.review_scope), ["custom", "uncommitted", "uncommitted", "base:main"]);

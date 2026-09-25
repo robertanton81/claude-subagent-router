@@ -30,8 +30,8 @@ if (args.includes("--plugin-dir")) {
   fs.mkdirSync(env.ORCH_DATA_DIR, { recursive: true });
   const enforce = env.ORCH_MODE === "enforce";
   fs.appendFileSync(path.join(env.ORCH_DATA_DIR, "dispatch-log.jsonl"),
-    JSON.stringify({ event: "dispatch", tool_use_id: "t1", requested: { agent: "orchestrator:implementer", model: null },
-      final: { agent: enforce ? "orchestrator:searcher" : "orchestrator:implementer", model: enforce ? "haiku" : null },
+    JSON.stringify({ event: "dispatch", tool_use_id: "t1", requested: { agent: "subagent-router:implementer", model: null },
+      final: { agent: enforce ? "subagent-router:searcher" : "subagent-router:implementer", model: enforce ? "haiku" : null },
       action: enforce ? "rewrite" : "shadow", reason: "search", jev: { kind: "search", kindConfidence: 1, difficulty: 1.2 } }) + "\\n" +
     JSON.stringify({ event: "launched", tool_use_id: "t1", resolved_model: enforce ? "claude-haiku-4-5" : "claude-sonnet-5" }) + "\\n");
 }
@@ -298,15 +298,15 @@ test("checkPassRule refuses a verdict on too few runs or on unequal cache warmth
 // own model, the dispatch record keeps `final.model` null, and only the
 // `launched` record says which model ran.
 test("the route grader accepts a worker that ran on its own default model", () => {
-  const task = { name: "t", expectRoute: { agent: "orchestrator:searcher", model: "haiku" } };
+  const task = { name: "t", expectRoute: { agent: "subagent-router:searcher", model: "haiku" } };
   const base = { task: "t", arm: "jev", is_error: false, timed_out: false, result: "x" };
-  const inherited = (resolved) => [{ final: { agent: "orchestrator:searcher", model: null }, resolved_model: resolved }];
+  const inherited = (resolved) => [{ final: { agent: "subagent-router:searcher", model: null }, resolved_model: resolved }];
 
   assert.equal(gradeRecord({ ...base, dispatches: inherited("claude-haiku-4-5-20251001") }, task).pass, true, "Haiku ran, so the route is the expected one");
   assert.equal(gradeRecord({ ...base, dispatches: inherited("claude-sonnet-5") }, task).pass, false, "Sonnet ran, so the route is wrong");
   assert.equal(gradeRecord({ ...base, dispatches: inherited(null) }, task).pass, false, "an unknown model is not a match");
   // A model that the hook set wins over the launched one, as before.
-  const set = [{ final: { agent: "orchestrator:searcher", model: "sonnet" }, resolved_model: "claude-haiku-4-5-20251001" }];
+  const set = [{ final: { agent: "subagent-router:searcher", model: "sonnet" }, resolved_model: "claude-haiku-4-5-20251001" }];
   assert.equal(gradeRecord({ ...base, dispatches: set }, task).pass, false);
 });
 
@@ -441,8 +441,8 @@ test("the command runs every task in every arm, records the runs and prints coun
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /Plan: 1 tasks x 4 arms x 2 runs = 8 runs/);
     assert.match(result.stdout, /Offline evaluation: 8 runs, \$0\.400 in total, 0 errors, 0 timeouts/);
-    assert.match(result.stdout, /orchestrator:implementer -> orchestrator:searcher\/haiku \(rewrite: search\) x2/);
-    assert.match(result.stdout, /orchestrator:implementer -> orchestrator:implementer\/default \(shadow: search\) x2/);
+    assert.match(result.stdout, /subagent-router:implementer -> subagent-router:searcher\/haiku \(rewrite: search\) x2/);
+    assert.match(result.stdout, /subagent-router:implementer -> subagent-router:implementer\/default \(shadow: search\) x2/);
     assert.ok(!result.stdout.includes("SECRET-MARKER"), "the prompt stays out of the output");
 
     const records = readLines(path.join(outDir, "runs.jsonl"));
@@ -561,7 +561,7 @@ test("--dry-run prints the plan and starts nothing", async () => {
 test("--regrade grades saved runs again and starts nothing", async () => {
   const { tempDir, project, taskSetFile, log, env } = setUp();
   try {
-    const task = { name: "one", prompt: "x", cwd: project, timeoutS: 30, expect: { contains: ["answer to:"] }, expectRoute: { agent: "orchestrator:searcher", model: "haiku" } };
+    const task = { name: "one", prompt: "x", cwd: project, timeoutS: 30, expect: { contains: ["answer to:"] }, expectRoute: { agent: "subagent-router:searcher", model: "haiku" } };
     writeTaskSet(taskSetFile, [task]);
     const outDir = path.join(tempDir, "out");
     const first = await runNode("scripts/orch-eval.mjs", { args: [taskSetFile, "--arms", "sonnet,jev", "--out", outDir], env });
@@ -572,7 +572,7 @@ test("--regrade grades saved runs again and starts nothing", async () => {
     const callsAfterRun = readLines(log).length;
 
     // The same records, graded against a task that expects another route.
-    writeTaskSet(taskSetFile, [{ ...task, expectRoute: { agent: "orchestrator:implementer", model: "opus" } }]);
+    writeTaskSet(taskSetFile, [{ ...task, expectRoute: { agent: "subagent-router:implementer", model: "opus" } }]);
     const again = await runNode("scripts/orch-eval.mjs", { args: [taskSetFile, "--regrade", outDir], env });
     assert.equal(again.code, 0, again.stderr);
     assert.match(again.stdout, /Graded again from .*runs\.jsonl, 2 saved runs\. Nothing was started\./);

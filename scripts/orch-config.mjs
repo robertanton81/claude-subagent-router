@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Reads and writes the plugin's settings file, so nobody has to hand-edit JSON.
-// The skill orchestrator:configure drives this from a session, and a person can
+// The skill subagent-router:configure drives this from a session, and a person can
 // run it directly.
 //
 //   node scripts/orch-config.mjs show

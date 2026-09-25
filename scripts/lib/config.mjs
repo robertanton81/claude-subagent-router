@@ -2,7 +2,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const PLUGIN = "orchestrator";
+export const PLUGIN = "subagent-router";
+
+// Up to version 0.2.3 the plugin was named "orchestrator", and the dispatch log
+// kept from that time names the workers "orchestrator:<worker>". Readers of the
+// log map such a name to the current one, so old records still count.
+const LEGACY_WORKER = /^orchestrator:([a-z-]+)$/;
+
+export function currentAgentName(name) {
+  const match = typeof name === "string" ? LEGACY_WORKER.exec(name) : null;
+  return match ? `${PLUGIN}:${match[1]}` : name;
+}
 
 // A lookup table without inherited keys. With a plain object, a name such as
 // "constructor" would find a function on Object.prototype and count as a match.
@@ -249,7 +259,7 @@ export const CONFIG_SPEC = Object.freeze({
   pacing: { kind: "flag", about: "also count a window as full when the usage so far is on pace to reach 100 percent before the reset" },
   paceAfter: { kind: "number", min: 0, max: 1, about: "how much of a window must pass before the pace rule counts" },
   limitsMaxAgeMs: { kind: "number", min: 0, max: 24 * 3600 * 1000, about: "how long a usage sample stays usable, in milliseconds" },
-  jevEnabled: { kind: "flag", about: "let the hook send briefs to the TypeSafe classifier Jev, which the routing needs" },
+  jevEnabled: { kind: "flag", about: "let the hooks send briefs, and the verification part of worker answers, to the TypeSafe classifier Jev, which the routing needs" },
   jevTimeoutMs: { kind: "number", min: 100, max: 8000, about: "how long to wait for the classifier, in milliseconds" },
   jevModel: { kind: "text", about: "the classifier version; pin an exact version while measuring" },
   jevUrl: { kind: "text", about: "where the classifier request goes" },

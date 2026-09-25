@@ -11,11 +11,11 @@ import { appendLog, logFile, logMaxBytes, readLogTail, rotatedLogFile, truncate 
 import { QUESTIONS, buildRequest } from "../scripts/lib/questions.mjs";
 import { JevError, readAnswers } from "../scripts/lib/typesafe.mjs";
 import { lastWriterFamily, readLimitsState, recordWriterDispatch, recordWriterLaunch, recordWriterStop } from "../scripts/lib/context.mjs";
-import { countFindings, reportsNoWrite } from "../scripts/lib/findings.mjs";
+import { countFindings, reportsNoWrite, verificationText } from "../scripts/lib/findings.mjs";
 import { CLAUDE_FALLBACK, FIVE_HOURS_MS, SEVEN_DAYS_MS, claudeCapNotice, claudeNotice, claudeState, firstNotice, windowVerdict } from "../scripts/lib/provider-state.mjs";
 import { readRouteLine } from "../scripts/lib/route-line.mjs";
 import { PS_TIMEOUT_MS } from "../scripts/lib/writer-lock.mjs";
-import { ROOT, cleanEnv, jevBody, makeTempDir, readLog, runNode } from "./helpers.mjs";
+import { ROOT, cleanEnv, jevBody, makeTempDir, readLog, runNode, startFakeJev } from "./helpers.mjs";
 
 test("the default model of each worker matches the agent file", () => {
   for (const worker of WORKER_SET) {
@@ -160,15 +160,15 @@ test("the log hook writes one record for each of its three events", async () => 
         cwd: "/work/project",
         tool_name: "Agent",
         tool_use_id: "toolu_1",
-        tool_input: { subagent_type: "orchestrator:searcher", model: "haiku" },
+        tool_input: { subagent_type: "subagent-router:searcher", model: "haiku" },
         tool_response: { status: "async_launched", agentId: "a1", resolvedModel: "claude-haiku-4-5" }
       },
-      { hook_event_name: "SubagentStart", session_id: "s", agent_id: "a1", agent_type: "orchestrator:codex-reviewer" },
+      { hook_event_name: "SubagentStart", session_id: "s", agent_id: "a1", agent_type: "subagent-router:codex-reviewer" },
       {
         hook_event_name: "SubagentStop",
         session_id: "s",
         agent_id: "a1",
-        agent_type: "orchestrator:codex-reviewer",
+        agent_type: "subagent-router:codex-reviewer",
         last_assistant_message: "- [P1] Stop the loop — a.js:4\n- [P2] Empty list — a.js:5"
       },
       { hook_event_name: "SubagentStop", session_id: "s", agent_id: "a2", agent_type: "Explore", last_assistant_message: "private text" },
@@ -183,7 +183,7 @@ test("the log hook writes one record for each of its three events", async () => 
     assert.equal(records.length, 4, "a stop with an empty agent type writes no record");
     const [launched, start, stop, otherStop] = records;
     assert.deepEqual([launched.event, launched.resolved_model, launched.agent_id, launched.cwd], ["launched", "claude-haiku-4-5", "a1", "/work/project"]);
-    assert.deepEqual([start.event, start.agent_type, start.cwd], ["start", "orchestrator:codex-reviewer", null]);
+    assert.deepEqual([start.event, start.agent_type, start.cwd], ["start", "subagent-router:codex-reviewer", null]);
     assert.deepEqual(stop.findings, { P0: 0, P1: 1, P2: 1, P3: 0 });
     assert.ok(stop.result.includes("Stop the loop"));
     assert.equal(otherStop.result, undefined, "results of other agent types are not stored");
@@ -198,7 +198,7 @@ test("the session start hook prints the worker list as plain text", async () => 
     const result = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { ORCH_MODE: "shadow" }) });
     assert.equal(result.code, 0);
     assert.match(result.stdout, /"shadow" mode/);
-    assert.match(result.stdout, /orchestrator:codex-reviewer/);
+    assert.match(result.stdout, /subagent-router:codex-reviewer/);
     assert.ok(!result.stdout.trimStart().startsWith("{"), "plain text, not JSON");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -415,9 +415,9 @@ test("the session start hook tells the user when a subscription has no room", as
     fs.writeFileSync(path.join(tempDir, "data", "codex-limits.json"), JSON.stringify({ usedPercent: 100, resetsAt: Date.now() + 3600 * 1000, ts: Date.now() }));
     const result = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir) });
     const output = JSON.parse(result.stdout);
-    assert.match(output.systemMessage, /^Orchestrator: The weekly Codex allowance/);
+    assert.match(output.systemMessage, /^Subagent router: The weekly Codex allowance/);
     assert.equal(output.hookSpecificOutput.hookEventName, "SessionStart");
-    assert.match(output.hookSpecificOutput.additionalContext, /orchestrator:searcher[\s\S]*State of the subscriptions right now/);
+    assert.match(output.hookSpecificOutput.additionalContext, /subagent-router:searcher[\s\S]*State of the subscriptions right now/);
 
     // In shadow mode the hook changes nothing, so there is nothing to announce.
     const shadow = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { ORCH_MODE: "shadow" }) });
@@ -436,7 +436,7 @@ test("the session start hook fails open: an error inside it gives exit 0, a line
     const env = cleanEnv(tempDir, { NODE_OPTIONS: `--import=${pathToFileURL(preload).href}` });
     const result = await runNode("scripts/session-start.mjs", { env, stdin: JSON.stringify({ session_id: "s1", cwd: tempDir, source: "startup" }) });
     assert.equal(result.code, 0, result.stderr);
-    assert.match(result.stderr, /orchestrator session start hook failed: stdout is gone/);
+    assert.match(result.stderr, /subagent-router session start hook failed: stdout is gone/);
     const errors = readLog(tempDir).filter((record) => record.event === "hook_error");
     assert.deepEqual(errors.map((record) => [record.hook, record.error]), [["session-start", "stdout is gone"]]);
     // The work before the failure still happened.
@@ -458,10 +458,10 @@ test("the session start hook names every worker in agents/, each Claude worker w
       const text = fs.readFileSync(path.join(agentsDir, file), "utf8");
       const name = text.match(/^name: (.+)$/m)[1].trim();
       const model = text.match(/^model: (.+)$/m)[1].trim();
-      assert.ok(result.stdout.includes(`orchestrator:${name}`), `the session start names orchestrator:${name}`);
+      assert.ok(result.stdout.includes(`subagent-router:${name}`), `the session start names subagent-router:${name}`);
       if (!name.startsWith("codex-")) {
         // The two Codex workers are thin Haiku wrappers; the model that matters for them is Codex.
-        assert.ok(result.stdout.includes(`orchestrator:${name} (${model})`), `orchestrator:${name} is listed with ${model}`);
+        assert.ok(result.stdout.includes(`subagent-router:${name} (${model})`), `subagent-router:${name} is listed with ${model}`);
       }
     }
   } finally {
@@ -503,7 +503,7 @@ test("with Codex off, the session start names the Codex workers as off and sends
     const result = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { ORCH_CODEX_ENABLED: "" }) });
     assert.equal(result.code, 0);
     assert.ok(!result.stdout.trimStart().startsWith("{"), "plain text, so no notice for the user");
-    assert.match(result.stdout, /orchestrator:codex-reviewer: off\. Codex is opt-in/);
+    assert.match(result.stdout, /subagent-router:codex-reviewer: off\. Codex is opt-in/);
     assert.match(result.stdout, /hook sends no task to Codex/);
     assert.ok(!result.stdout.includes("Codex reviews changes from Claude workers"));
   } finally {
@@ -676,7 +676,7 @@ test("a rotation that fails still appends the record, and says why on stderr", (
     assert.equal(appendLog({ n: 4, big }, env), true);
     assert.deepEqual(readLogTail(env).map((record) => record.n), [1, 2, 3, 4], "no record is lost while the rotation fails");
     const messages = stderr.mock.calls.map((call) => String(call.arguments[0]));
-    assert.equal(messages.filter((text) => text.startsWith("orchestrator: cannot rotate the dispatch log:")).length, 2, messages.join(""));
+    assert.equal(messages.filter((text) => text.startsWith("subagent-router: cannot rotate the dispatch log:")).length, 2, messages.join(""));
 
     // Once the obstacle is gone, the next append rotates as usual.
     fs.rmSync(rotatedLogFile(env), { recursive: true });
@@ -1152,7 +1152,7 @@ test("the session start offers the configure skill only while no settings file e
     const first = await runNode("scripts/session-start.mjs", { env });
     assert.equal(first.code, 0);
     assert.match(first.stdout, /No settings file exists for this plugin yet/);
-    assert.match(first.stdout, /orchestrator:configure/);
+    assert.match(first.stdout, /subagent-router:configure/);
 
     fs.mkdirSync(path.join(tempDir, "data"), { recursive: true });
     fs.writeFileSync(path.join(tempDir, "data", "config.json"), '{"mode":"shadow"}');
@@ -1161,6 +1161,117 @@ test("the session start offers the configure skill only while no settings file e
     assert.ok(!configured.stdout.includes("No settings file exists"), "the offer stops once a settings file exists");
     assert.match(configured.stdout, /"shadow" mode/, "the rest of the text is unchanged");
   } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a worker that wrote nothing is found also when its report uses markdown", () => {
+  for (const text of [
+    "**Changed files:** none",
+    "- Changed files: none",
+    "Changed files: (none)",
+    "Changed files: nothing",
+    "`Changed files:` none\nVerification: read only",
+    "Summary first.\n  * Changed files: No files"
+  ]) {
+    assert.equal(reportsNoWrite(text), true, text);
+  }
+  for (const text of ["**Changed files:** src/a.js", "- Changed files: src/none.js", "I changed nothing else.\nChanged files: a.js", "Changed files: a.js, and none of the tests"]) {
+    assert.equal(reportsNoWrite(text), false, text);
+  }
+});
+
+test("the verification part is found also when its labels use markdown", () => {
+  assert.equal(verificationText("Changed files: a.js\n**Verification:** npm test, 3 passed\nmore output\n**Open problems:** none"), "npm test, 3 passed\nmore output");
+  assert.equal(verificationText("- Verification: not run\n- Open problems: none"), "not run");
+  assert.equal(verificationText("Changed files: a.js\nOpen problems: none"), null);
+});
+
+const VERIFY_STOP = {
+  hook_event_name: "SubagentStop",
+  session_id: "s",
+  cwd: "/work/project",
+  agent_id: "a1",
+  agent_type: "subagent-router:implementer",
+  last_assistant_message: "Changed files: src/private-name.js\nVerification: npm test: 225 pass, 0 fail\nOpen problems: none"
+};
+
+function verificationReply(choice = "passed", confidence = 0.95) {
+  return { body: { model: "jev-test", answers: { outcome: { type: "choice", choice, probabilities: { [choice]: 1 }, confidence } }, usage: { input_tokens: 120, output_tokens: 1 } } };
+}
+
+test("the log hook asks Jev how a worker's checks ended and logs the answer", async () => {
+  const tempDir = makeTempDir();
+  const jev = await startFakeJev(verificationReply("passed"));
+  try {
+    const env = cleanEnv(tempDir, { ORCH_TYPESAFE_URL: jev.url, TYPESAFE_API_KEY: "test-key-not-a-secret" });
+    const result = await runNode("scripts/log-hook.mjs", { stdin: JSON.stringify(VERIFY_STOP), env });
+    assert.deepEqual([result.code, result.stdout], [0, ""]);
+
+    assert.equal(jev.state.requests.length, 1);
+    const sent = jev.state.requests[0].body;
+    // Only the verification part leaves the machine, not the file names or the rest.
+    assert.deepEqual(sent.state, { verification: "npm test: 225 pass, 0 fail" });
+    assert.deepEqual(Object.keys(sent.questions), ["outcome"]);
+
+    const [stop, verification] = readLog(tempDir);
+    assert.equal(stop.event, "stop", "the stop record is written before the Jev call");
+    assert.deepEqual(
+      [verification.event, verification.agent_id, verification.outcome, verification.confidence, verification.key_source],
+      ["verification", "a1", "passed", 0.95, "env"]
+    );
+  } finally {
+    await jev.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("the log hook sends nothing about a worker's checks while Jev is off, the mode is off, or the agent is not a worker", async () => {
+  const tempDir = makeTempDir();
+  const jev = await startFakeJev(verificationReply());
+  try {
+    const env = cleanEnv(tempDir, { ORCH_TYPESAFE_URL: jev.url, TYPESAFE_API_KEY: "test-key-not-a-secret" });
+    const cases = [
+      ["Jev off", VERIFY_STOP, { ...env, ORCH_JEV_ENABLED: "" }],
+      ["mode off", VERIFY_STOP, { ...env, ORCH_MODE: "off" }],
+      ["not a worker", { ...VERIFY_STOP, agent_type: "Explore" }, env],
+      ["no Verification line", { ...VERIFY_STOP, last_assistant_message: "Changed files: a.js\nOpen problems: none" }, env]
+    ];
+    for (const [name, event, caseEnv] of cases) {
+      const result = await runNode("scripts/log-hook.mjs", { stdin: JSON.stringify(event), env: caseEnv });
+      assert.equal(result.code, 0, name);
+      assert.equal(jev.state.requests.length, 0, `${name}: nothing may reach Jev`);
+    }
+    assert.equal(readLog(tempDir).filter((record) => record.event === "verification").length, 0);
+  } finally {
+    await jev.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a failed or unknown verification answer is logged as an error and keeps the stop record", async () => {
+  const tempDir = makeTempDir();
+  const jev = await startFakeJev({ status: 500, body: "server echoed test-key-not-a-secret" });
+  try {
+    const env = cleanEnv(tempDir, { ORCH_TYPESAFE_URL: jev.url, TYPESAFE_API_KEY: "test-key-not-a-secret" });
+    await runNode("scripts/log-hook.mjs", { stdin: JSON.stringify(VERIFY_STOP), env });
+    jev.state.reply = verificationReply("maybe");
+    await runNode("scripts/log-hook.mjs", { stdin: JSON.stringify({ ...VERIFY_STOP, agent_id: "a2" }), env });
+    // A reply slower than the 3-second limit ends as a timeout, although jevTimeoutMs
+    // allows 8 seconds. The reply comes after 7 seconds; the wide margin keeps the
+    // test stable on a busy machine, where Node itself can take a second to start.
+    jev.state.reply = { ...verificationReply(), delayMs: 7000 };
+    const started = Date.now();
+    await runNode("scripts/log-hook.mjs", { stdin: JSON.stringify({ ...VERIFY_STOP, agent_id: "a3" }), env: { ...env, ORCH_JEV_TIMEOUT_MS: "8000" } });
+    assert.ok(Date.now() - started < 6000, "the hook must not wait for the full jevTimeoutMs");
+
+    const records = readLog(tempDir);
+    assert.equal(records.filter((record) => record.event === "stop").length, 3);
+    const errors = records.filter((record) => record.event === "verification").map((record) => record.error);
+    assert.deepEqual(errors, ["http_500", "bad_response", "timeout"]);
+    assert.ok(!fs.readFileSync(path.join(tempDir, "data", "dispatch-log.jsonl"), "utf8").includes("test-key-not-a-secret"), "the key never reaches the log");
+  } finally {
+    await jev.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

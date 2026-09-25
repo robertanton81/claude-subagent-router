@@ -75,7 +75,7 @@ function appendWriterRecord(record, env) {
     fs.appendFileSync(file, `${JSON.stringify(record)}\n`, { mode: 0o600 });
     makeFilePrivate(file);
   } catch (error) {
-    process.stderr.write(`orchestrator: cannot write the writers index: ${error.message}\n`);
+    process.stderr.write(`subagent-router: cannot write the writers index: ${error.message}\n`);
   }
 }
 

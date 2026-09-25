@@ -53,7 +53,7 @@ export function markCodexUnavailable(message, env = process.env, now = Date.now(
     fs.writeFileSync(temporary, JSON.stringify({ until: retryTimeFromMessage(message, now), message: String(message).slice(0, 300), recorded_at: new Date(now).toISOString() }));
     fs.renameSync(temporary, file(env));
   } catch (error) {
-    process.stderr.write(`orchestrator: cannot record that Codex is unavailable: ${error.message}\n`);
+    process.stderr.write(`subagent-router: cannot record that Codex is unavailable: ${error.message}\n`);
   }
 }
 

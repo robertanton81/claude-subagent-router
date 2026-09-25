@@ -1,4 +1,5 @@
-// The five questions that Jev answers for every dispatch.
+// The five questions that Jev answers for every dispatch, and at the end the
+// one question about a finished worker's checks.
 // Jev sees only the brief. It does not see which worker the orchestrator asked
 // for, so its answer is an independent second opinion.
 
@@ -80,6 +81,39 @@ export const QUESTIONS = Object.freeze({
 });
 
 export const KINDS = Object.freeze(Object.keys(KIND.criteria));
+
+// The one question about a finished worker. Its answer feeds the report's
+// count of failed and skipped checks. A word search did this before and was
+// often wrong: "0 fail" and "no errors" matched the words "fail" and "errors".
+// The criteria name those cases, because Jev reads criteria literally.
+const VERIFICATION = {
+  type: "choice",
+  instructions:
+    "`verification` is the part of a helper's report that says how the helper checked its own work. What was the result of those checks?",
+  criteria: {
+    passed:
+      "The checks that the helper ran all succeeded, or the searches and reading it names confirmed its answer. A count of zero, such as \"0 failed\" or \"no errors\", is a success.",
+    failed:
+      "At least one check that the helper ran failed, reported an error, or ended with an exit code other than 0.",
+    not_run:
+      "The helper ran no check, for example \"not run\" with a reason, or \"read only\".",
+    unclear: "The text does not say whether the checks succeeded."
+  }
+};
+
+export const VERIFICATION_OUTCOMES = Object.freeze(Object.keys(VERIFICATION.criteria));
+
+// Only the verification part is sent, and only its start: the rest of a
+// worker's answer is not needed for this question and stays on the machine.
+export const VERIFICATION_MAX_CHARS = 2000;
+
+export function buildVerificationRequest(text, config) {
+  return {
+    model: config.jevModel,
+    state: { verification: String(text).slice(0, VERIFICATION_MAX_CHARS) },
+    questions: { outcome: VERIFICATION }
+  };
+}
 
 export function buildRequest(brief, config) {
   return {

@@ -1,4 +1,4 @@
-# LLM Orchestrator
+# Claude Subagent Router
 
 A Claude Code plugin that picks the model for each subagent task. It sends a task to the smallest Claude model that can do it, and it can move work to the Codex CLI.
 
@@ -22,36 +22,36 @@ The plugin calls no Claude or OpenAI API; the work stays inside your subscriptio
 This repository is also a marketplace (a catalog of plugins that Claude Code can install from), in `.claude-plugin/marketplace.json`. Add it once, then install the plugin for one project:
 
 ```bash
-claude plugin marketplace add robertanton81/llm-orchestrator
+claude plugin marketplace add robertanton81/claude-subagent-router
 ```
 
 ```bash
-cd /path/to/your-project && claude plugin install orchestrator@llm-orchestrator --scope local
+cd /path/to/your-project && claude plugin install subagent-router@claude-subagent-router --scope local
 ```
 
-`--scope local` writes the switch to `.claude/settings.local.json` of that project, which git does not track. Leave `--scope` out to turn the plugin on in every project. `claude plugin marketplace update llm-orchestrator` fetches a new version.
+`--scope local` writes the switch to `.claude/settings.local.json` of that project, which git does not track. Leave `--scope` out to turn the plugin on in every project. `claude plugin marketplace update claude-subagent-router` fetches a new version.
 
 Then follow the setup below. Until you turn Jev on, the hook sends nothing to TypeSafe and changes no route.
 
 ## Setup
 
-Run the check at any time with `/orchestrator:setup` in a session. From a clone of this repository the same check is `node scripts/setup-check.mjs --live`. It never prints a secret.
+Run the check at any time with `/subagent-router:setup` in a session. From a clone of this repository the same check is `node scripts/setup-check.mjs --live`. It never prints a secret.
 
-0. **Settings.** Run `/orchestrator:configure` in a session and answer its questions, or leave everything at its default and come back to the [Configuration](#configuration) section later. Codex stays off until you turn it on.
-1. **Codex CLI (only to use Codex).** Install it, run `codex login` with your ChatGPT account, and turn Codex on with `/orchestrator:configure` or `node scripts/orch-config.mjs set codexEnabled=true`.
+0. **Settings.** Run `/subagent-router:configure` in a session and answer its questions, or leave everything at its default and come back to the [Configuration](#configuration) section later. Codex stays off until you turn it on.
+1. **Codex CLI (only to use Codex).** Install it, run `codex login` with your ChatGPT account, and turn Codex on with `/subagent-router:configure` or `node scripts/orch-config.mjs set codexEnabled=true`.
 2. **Jev and its key (for the routing).** Follow the four steps in [TypeSafe and Jev](#typesafe-and-jev): create a key, store it in the plugin option, set `jevEnabled` to true, and check it.
 3. **Status line log (optional).** The limit rule and the measurement need the two rate limit percentages, their reset times and the session id. Only the status line receives them. Paste the lines from [scripts/statusline-snippet.sh](scripts/statusline-snippet.sh) into your status line script, after the place where it reads `rate_limits`. The block reads the variables `RATE_5H`, `RATE_7D`, `RATE_5H_RESET`, `RATE_7D_RESET` and `SESSION_ID`; set the ones your script has, and the others are written as null. Without this file the limit rule is off, and everything else works. `node scripts/setup-check.mjs` says when the file is there but comes from an older snippet without the reset times.
 4. **Permission for the Codex workers (optional).** The Codex workers run one Bash command. To avoid a prompt each time, allow it in your settings: `Bash(node */scripts/orch-codex.mjs *)`.
 
 ## What leaves your machine
 
-- **To TypeSafe, only while Jev is on:** the brief (the prompt) of each `Agent` call that the hook routes, and nothing else. A brief can hold code and project rules. Set `"routeOtherAgents": false` to keep the briefs of agent types other than the plugin's own workers on your machine, or set `"mode": "off"` to send none.
+- **To TypeSafe, only while Jev is on:** the brief (the prompt) of each `Agent` call that the hook routes, and the `Verification:` part of each answer from the plugin's own workers (at most 2,000 characters; the file list and the rest of the answer stay here). Nothing else. A brief can hold code and project rules, and a verification part can quote test output. Set `"routeOtherAgents": false` to keep the briefs of agent types other than the plugin's own workers on your machine, or set `"mode": "off"` to send none.
 - **To OpenAI, only while Codex is on:** the brief of each task that runs on Codex, plus your `~/.claude/CLAUDE.md` and the project's `CLAUDE.md` files for an implement task. A project `CLAUDE.md` that is a link to a file outside the project is not sent.
 - **Nothing else.** The dispatch log, the Codex jobs and the settings stay in `~/.claude/orchestrator/`, readable only by your user. The TypeSafe key is never written to a log.
 
 ## TypeSafe and Jev
 
-**What it is.** [TypeSafe](https://typesafe.ai) is a third-party API. Its model Jev is a classifier: it does not write text, it answers fixed questions with probabilities. The plugin asks Jev five questions about each brief: the kind of task, whether it changes files, whether the brief is self-contained, how hard it is, and whether the answer must name every match. A table in code turns the answers into a route. The questions are in [scripts/lib/questions.mjs](scripts/lib/questions.mjs).
+**What it is.** [TypeSafe](https://typesafe.ai) is a third-party API. Its model Jev is a classifier: it does not write text, it answers fixed questions with probabilities. The plugin asks Jev five questions about each brief: the kind of task, whether it changes files, whether the brief is self-contained, how hard it is, and whether the answer must name every match. A table in code turns the answers into a route. When one of the plugin's workers finishes, the log hook asks one more question: did the checks named in its `Verification:` line pass, fail, or not run? The report counts the answers. Before, a word search did this and read "0 fail" or "no errors" as a failure. The questions are in [scripts/lib/questions.mjs](scripts/lib/questions.mjs).
 
 **Why the plugin uses it.** The routing needs a judgment about each task, and asking a Claude model for it would spend the same subscription the plugin tries to save. Jev answers in a few hundred milliseconds, and it costs much less than one subagent start.
 
@@ -68,16 +68,16 @@ Run the check at any time with `/orchestrator:setup` in a session. From a clone 
 2. Store the key in the plugin option. Copy the key, then run this in a terminal. Add the `--scope` of your install, for example `--scope local` in the project folder:
 
    ```bash
-   k=$(pbpaste) && claude plugin install orchestrator@llm-orchestrator --config "typesafe_api_key=$k"; unset k; pbcopy </dev/null
+   k=$(pbpaste) && claude plugin install subagent-router@claude-subagent-router --config "typesafe_api_key=$k"; unset k; pbcopy </dev/null
    ```
 
    `pbpaste` reads the key from the clipboard, so it is never typed, printed or kept in the shell history, and `pbcopy </dev/null` clears the clipboard. On Linux, use `xclip -o -selection clipboard` or `wl-paste` instead of `pbpaste`. The command also works when the plugin is already installed: it keeps the install and sets the option. Claude Code keeps a sensitive option in the macOS Keychain, or in `~/.claude/.credentials.json` on other systems, and passes it only to this plugin's hooks. The Claude Code docs also describe a prompt for the option when the plugin is enabled. For scripts, CI and the evaluation runner, the variable `TYPESAFE_API_KEY` works too. No other place is read: no key file in your home folder, and never a `.env` in a project, because a cloned repository could ship its own key and receive your briefs in its own TypeSafe account.
-3. Set `"jevEnabled": true` with `/orchestrator:configure` or `node scripts/orch-config.mjs set jevEnabled=true`. For one session, `ORCH_JEV_ENABLED=1` or `0` overrides the file. A key alone does not turn Jev on.
-4. Start a new session and let it delegate one task, then run `/orchestrator:setup`. Claude Code passes the plugin option only to hooks, so the check cannot see the key itself; its row "TypeSafe key" reports where the hook found the key on its last routed call.
+3. Set `"jevEnabled": true` with `/subagent-router:configure` or `node scripts/orch-config.mjs set jevEnabled=true`. For one session, `ORCH_JEV_ENABLED=1` or `0` overrides the file. A key alone does not turn Jev on.
+4. Start a new session and let it delegate one task, then run `/subagent-router:setup`. Claude Code passes the plugin option only to hooks, so the check cannot see the key itself; its row "TypeSafe key" reports where the hook found the key on its last routed call.
 
 **What it sends.** One request per routed `Agent` call: the call's description and its whole prompt, plus the five questions. Nothing else from your machine. A prompt can hold code and project rules. `"routeOtherAgents": false` limits the requests to calls to the plugin's own workers, and `"mode": "off"` stops them all. TypeSafe states that Jev is not trained on customer requests; see its [data handling](https://docs.typesafe.ai/models) and [legal](https://docs.typesafe.ai/legal) pages.
 
-**What it costs.** Jev is paid per input token: $0.042 per million tokens for Jev 1.13 (output is free; price from docs.typesafe.ai/models, checked 2026-09-24). A routed brief measured about 1,000 to 1,700 tokens, so a call costs about $0.00005, or about $1 per 20,000 dispatches. `/orchestrator:report` counts the calls and shows how many of them changed a route. When that share stays near zero, Jev costs money and saves nothing, and you can turn it off.
+**What it costs.** Jev is paid per input token: $0.042 per million tokens for Jev 1.13 (output is free; price from docs.typesafe.ai/models, checked 2026-09-24). A routed brief measured about 1,000 to 1,700 tokens, so a call costs about $0.00005, or about $1 per 20,000 dispatches. The question about a finished worker's checks sends one short question and at most 2,000 characters, so it costs less than a routing call. `/subagent-router:report` counts the calls and shows how many of them changed a route. When that share stays near zero, Jev costs money and saves nothing, and you can turn it off.
 
 **When it fails.** On a timeout (`jevTimeoutMs`, 5 seconds by default), an HTTP error or a missing key, the call runs as the orchestrator wrote it. The key is never written to a log; an error text from TypeSafe has the key removed before it is stored.
 
@@ -91,13 +91,13 @@ Run the check at any time with `/orchestrator:setup` in a session. From a clone 
 
 | Worker | Runs on | Effort | Job |
 | :-- | :-- | :-- | :-- |
-| `orchestrator:searcher` | Haiku | none | Finds and explains code. Changes no files. |
-| `orchestrator:complete-searcher` | Sonnet | `low` | Lists every match when the answer must be complete. Changes no files. A search the orchestrator sends to it stays there. |
-| `orchestrator:implementer` | Sonnet | `high` | Writes and changes code inside a defined scope. |
-| `orchestrator:debugger` | Opus | `medium` | Finds the cause of a failure. |
-| `orchestrator:reviewer` | Sonnet | `high` | Reviews changes. Changes no files. |
-| `orchestrator:codex-implementer` | Codex CLI | Codex settings | Implements a task on the ChatGPT plan. Needs a complete brief. |
-| `orchestrator:codex-reviewer` | Codex CLI | Codex settings | Reviews the uncommitted changes, a branch or a commit. |
+| `subagent-router:searcher` | Haiku | none | Finds and explains code. Changes no files. |
+| `subagent-router:complete-searcher` | Sonnet | `low` | Lists every match when the answer must be complete. Changes no files. A search the orchestrator sends to it stays there. |
+| `subagent-router:implementer` | Sonnet | `high` | Writes and changes code inside a defined scope. |
+| `subagent-router:debugger` | Opus | `medium` | Finds the cause of a failure. |
+| `subagent-router:reviewer` | Sonnet | `high` | Reviews changes. Changes no files. |
+| `subagent-router:codex-implementer` | Codex CLI | Codex settings | Implements a task on the ChatGPT plan. Needs a complete brief. |
+| `subagent-router:codex-reviewer` | Codex CLI | Codex settings | Reviews the uncommitted changes, a branch or a commit. |
 
 Effort is how much the model thinks before it answers. Each Claude worker sets it in its agent file, at the default of its own model (Sonnet 5 `high`, Opus 5.5 `medium`), so the session's effort does not carry over to the workers. Haiku 4.5 takes no effort. The level stays when the hook changes the model: an implementer moved to Opus runs at `high`. The variable `CLAUDE_CODE_EFFORT_LEVEL` overrides it. The Codex workers use the model and effort of `~/.codex/config.toml`, unless the brief has a `codex-model:` or `codex-effort:` line.
 
@@ -126,10 +126,10 @@ The briefs of these calls go to TypeSafe, like the briefs for our workers. A pro
 
 Codex is off until you turn it on. While it is off:
 
-- The routing table sends no task to Codex. Reviews go to `orchestrator:reviewer`.
+- The routing table sends no task to Codex. Reviews go to `subagent-router:reviewer`.
 - A direct call to a Codex worker runs on its Claude counterpart, `implementer` or `reviewer`, on Sonnet. Claude Code shows one notice per session.
 - The runner starts no Codex job in any mode, and it does not even run `codex login status`.
-- A call to the Codex plugin's own agent `codex:codex-rescue` passes unchanged. The hook redirects it to `orchestrator:codex-implementer` only while Codex is on.
+- A call to the Codex plugin's own agent `codex:codex-rescue` passes unchanged. The hook redirects it to `subagent-router:codex-implementer` only while Codex is on.
 - The setup check reports `Codex: off` and skips the Codex CLI checks.
 - When Claude usage is high, no work can move to Codex. The hook then picks no model above Sonnet. See the next section.
 
@@ -162,14 +162,14 @@ Task text is not trusted. It can quote a web page or an issue. So it never goes 
 
 ## Use
 
-After the install and the setup, work as usual. The hook routes each subagent call by itself, and every dispatch goes to the log. `/orchestrator:report` shows what the routing did, and `/orchestrator:configure` changes the settings.
+After the install and the setup, work as usual. The hook routes each subagent call by itself, and every dispatch goes to the log. `/subagent-router:report` shows what the routing did, and `/subagent-router:configure` changes the settings.
 
 ### Work on the plugin
 
 Clone the repository and load it for one session with a flag:
 
 ```bash
-claude --plugin-dir /path/to/llm-orchestrator
+claude --plugin-dir /path/to/claude-subagent-router
 ```
 
 Do not use the flag in a project where the plugin is installed. After a change to the plugin files, run `/reload-plugins` in the session, or start a new one.
@@ -197,7 +197,7 @@ The transport for the Codex workers works in every mode. Set the mode in the con
 
 Codex refuses review instructions together with a scope flag. So a scoped review uses Codex's own review rules, and only a `custom` review reads the brief.
 
-When the hook moves a review from `orchestrator:reviewer` to Codex and the brief names no scope, the request gets the scope `custom`, so the brief travels as the review instructions and nothing of it is lost. Before this, such a review became a review of the uncommitted changes, which is an empty diff in a clean checkout. The dispatch record shows the scope in `review_scope`, and the request file says in `scope_source` whether the scope came from the brief, from the routing or from the default.
+When the hook moves a review from `subagent-router:reviewer` to Codex and the brief names no scope, the request gets the scope `custom`, so the brief travels as the review instructions and nothing of it is lost. Before this, such a review became a review of the uncommitted changes, which is an empty diff in a clean checkout. The dispatch record shows the scope in `review_scope`, and the request file says in `scope_source` whether the scope came from the brief, from the routing or from the default.
 
 A Codex line that is present but not valid, for example `review-scope: branch:main`, stops the task with `CODEX_FAILED`. It never falls back in silence, because Codex would then review another diff than the one you asked for.
 
@@ -205,7 +205,7 @@ A Codex line that is present but not valid, for example `review-scope: branch:ma
 
 ## Configuration
 
-There are two ways to set this up. Inside a session, `/orchestrator:configure` asks what you want and writes the file for you. It asks about the five things that matter, leaves the rest at their defaults, and checks the setup afterwards. A session that finds no settings file says so once and offers it.
+There are two ways to set this up. Inside a session, `/subagent-router:configure` asks what you want and writes the file for you. It asks about the five things that matter, leaves the rest at their defaults, and checks the setup afterwards. A session that finds no settings file says so once and offers it.
 
 Outside a session, the same command reads and writes the file directly:
 
@@ -268,7 +268,7 @@ All settings live in one file, `~/.claude/orchestrator/config.json`. It is optio
 
 | Key | Default | Meaning |
 | :-- | :-- | :-- |
-| `jevEnabled` | `false` | Let the hook send briefs to Jev. The routing needs it. See [TypeSafe and Jev](#typesafe-and-jev). |
+| `jevEnabled` | `false` | Let the hooks send briefs, and the verification part of worker answers, to Jev. The routing needs it. See [TypeSafe and Jev](#typesafe-and-jev). |
 | `jevModel` | `jev-latest` | The classifier version. Pin an exact version while measuring, so the routing cannot change under you. |
 | `jevUrl` | the TypeSafe endpoint | Where the classifier request goes. |
 | `jevTimeoutMs` | `5000` | How long to wait for an answer, from 100 to 8000. On a timeout the call runs as written. |
@@ -319,7 +319,7 @@ Everything is in `~/.claude/orchestrator/`. The log holds your briefs, so it sta
 node scripts/orch-report.mjs
 ```
 
-Inside a session the same report is `/orchestrator:report`. It reads the whole store (`dispatch-log.jsonl`, its rotated file and `limits.jsonl`) and prints counts only: no brief, no description and no worker result reaches the output. `--json` prints the same numbers as JSON, `--since 2026-09-22` keeps only records from that time on, and `--project <text>` keeps only sessions whose project folder contains the text. Records from before 2026-09-22 have no project folder, so a project filter drops them.
+Inside a session the same report is `/subagent-router:report`. It reads the whole store (`dispatch-log.jsonl`, its rotated file and `limits.jsonl`) and prints counts only: no brief, no description and no worker result reaches the output. `--json` prints the same numbers as JSON, `--since 2026-09-22` keeps only records from that time on, and `--project <text>` keeps only sessions whose project folder contains the text. Records from before 2026-09-22 have no project folder, so a project filter drops them.
 
 What it prints, and what each number is for:
 
@@ -391,7 +391,7 @@ What happens when something goes wrong:
 
 - The writer lock covers Codex jobs only. For Claude workers, one writer at a time is a rule for the orchestrator.
 - An agent type of another owner waits for a Codex writer only when Jev answered and said that its task changes files. When Jev is not asked (`routeOtherAgents` is false, or the type is on the keep list) or fails, the call runs.
-- The hook redirects `codex:codex-rescue` to `orchestrator:codex-implementer`. This closes one known way around the routing, not all of them. It also changes what `/codex:rescue` does. Use `ORCH_MODE=off` to get the old behaviour.
+- The hook redirects `codex:codex-rescue` to `subagent-router:codex-implementer`. This closes one known way around the routing, not all of them. It also changes what `/codex:rescue` does. Use `ORCH_MODE=off` to get the old behaviour.
 - Codex reports zero tokens for a review run, so the log has no token count for reviews.
 - The hook learns the Codex limit numbers only after a Codex job that the plugin started. The numbers come from Codex's own session file, where Codex records each run. The format of that file is internal to Codex, not a public interface, so a Codex update can change it. A job that fails with a usage limit also pauses Codex until the time that Codex named. Between two jobs the numbers can be out of date. Then a job can still spend Codex credits, even when `codexSpendCredits` is `false`.
 - The routing table and the gates are first guesses. The log shows where Jev and the orchestrator disagree. It cannot show which route would have been better. That needs the same tasks with routing on and off.

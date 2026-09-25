@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- **New name.** The plugin is now `subagent-router`, and the repository and marketplace are `claude-subagent-router`. The old names did not say that this is a Claude Code plugin, or what it does. Agents and skills now start with `subagent-router:`, for example `/subagent-router:setup` and `subagent-router:reviewer`.
+- **To move an existing install:** run `claude plugin uninstall orchestrator@llm-orchestrator` in each project that uses it, then `claude plugin marketplace remove llm-orchestrator`, then follow the Install section of the README. Claude Code stores the TypeSafe key per plugin, so give it again with `--config typesafe_api_key=…`.
+- The settings and logs stay in `~/.claude/orchestrator/`. Status line scripts write rate limits to that folder, so moving it would break routing until each user changes their status line.
+- While Jev is on, the log hook asks Jev how the checks of each finished worker ended (passed, failed, not run or unclear) and logs the answer. Only the `Verification:` part of the answer is sent, at most 2,000 characters. The report uses these answers and falls back to the old word search for records without one. The word search read "0 fail" and "no errors" as failures.
+- A worker report such as `**Changed files:** none`, `- Changed files: none` or `Changed files: (none)` now counts as "wrote nothing". Before, only the plain line counted, so such a worker could count as the author of a change, and the cross-review then picked a reviewer from the wrong model family.
+
 ## 0.2.3
 
 - README, setup check and configure skill: the key goes into the plugin option with `claude plugin install … --config typesafe_api_key=…`, read from the clipboard. The earlier hint `/plugin configure` is not a documented command and did not ask for the key.

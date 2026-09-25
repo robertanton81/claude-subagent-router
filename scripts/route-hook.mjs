@@ -233,8 +233,8 @@ function emit(toolInput, requested, final, newPrompt, decision, systemMessage) {
   if (routed) {
     hookSpecificOutput.additionalContext =
       final.agent === requested.agent
-        ? `The orchestrator routing hook set the model ${final.model} for this task and kept the agent type. Reason: ${decision.reason}.`
-        : `The orchestrator routing hook ran this task on ${final.agent} with the model ${final.model}. Reason: ${decision.reason}.`;
+        ? `The subagent-router routing hook set the model ${final.model} for this task and kept the agent type. Reason: ${decision.reason}.`
+        : `The subagent-router routing hook ran this task on ${final.agent} with the model ${final.model}. Reason: ${decision.reason}.`;
   }
   // systemMessage is the field that Claude Code shows to the user.
   process.stdout.write(JSON.stringify(systemMessage ? { systemMessage, hookSpecificOutput } : { hookSpecificOutput }));
@@ -343,7 +343,7 @@ async function main() {
 
 main().catch((error) => {
   // Fail open: no output, exit code 0. The message goes to the debug log and to the dispatch log.
-  process.stderr.write(`orchestrator route hook failed: ${error?.stack ?? error}\n`);
+  process.stderr.write(`subagent-router route hook failed: ${error?.stack ?? error}\n`);
   const details = { name: error?.name ?? null, message: String(error?.message ?? error), stack: String(error?.stack ?? "").split("\n").slice(0, 6).join("\n") };
   if (record) {
     // Nothing was printed yet when main() failed, so the call runs as the orchestrator wrote it.

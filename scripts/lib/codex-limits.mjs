@@ -189,7 +189,7 @@ export function saveCodexLimits(limits, env = process.env, now = Date.now()) {
     fs.writeFileSync(temporary, JSON.stringify({ ...limits, ts: now }));
     fs.renameSync(temporary, limitsFile(env));
   } catch (error) {
-    process.stderr.write(`orchestrator: cannot save the Codex limits: ${error.message}\n`);
+    process.stderr.write(`subagent-router: cannot save the Codex limits: ${error.message}\n`);
   }
 }
 

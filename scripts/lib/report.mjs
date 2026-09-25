@@ -9,8 +9,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { DEFAULTS, DEFAULT_MODEL, REVIEWER_SET, WRITER_FAMILY, dataDir } from "./config.mjs";
-import { countFindings, reportsNoWrite } from "./findings.mjs";
+import { DEFAULTS, DEFAULT_MODEL, REVIEWER_SET, WRITER_FAMILY, currentAgentName, dataDir } from "./config.mjs";
+import { countFindings, reportsNoWrite, verificationText } from "./findings.mjs";
 import { logFile, rotatedLogFile } from "./log.mjs";
 import { FIVE_HOURS_MS, SEVEN_DAYS_MS, windowVerdict } from "./provider-state.mjs";
 
@@ -138,16 +138,23 @@ function noticeKind(text) {
   return "codex";
 }
 
-// The part of a worker result between "Verification:" and "Open problems:".
-function verificationText(result) {
-  if (typeof result !== "string") {
-    return null;
-  }
-  const match = result.match(/^Verification:\s*([\s\S]*?)(?=^Open problems:|(?![\s\S]))/im);
-  return match ? match[1].trim() : null;
-}
-
 // ---- The report ----
+
+// Records from before the rename to subagent-router name the workers
+// "orchestrator:<worker>". Every field that holds a worker name is mapped to
+// the current name, so old records keep their author, reviewer and model.
+function withCurrentAgentNames(record) {
+  const copy = { ...record };
+  if ("agent_type" in copy) {
+    copy.agent_type = currentAgentName(copy.agent_type);
+  }
+  for (const key of ["requested", "final", "route", "would_route"]) {
+    if (copy[key] && typeof copy[key] === "object" && "agent" in copy[key]) {
+      copy[key] = { ...copy[key], agent: currentAgentName(copy[key].agent) };
+    }
+  }
+  return copy;
+}
 
 export function buildReport(store, options = {}) {
   const sinceMs = options.since ?? null;
@@ -166,7 +173,7 @@ export function buildReport(store, options = {}) {
     return true;
   };
 
-  const log = store.log.filter((record) => record.event !== undefined && keepRecord(record));
+  const log = store.log.filter((record) => record.event !== undefined && keepRecord(record)).map(withCurrentAgentNames);
   const limits = store.limits.filter((record) => sinceMs === null || (typeof record.ts === "number" && record.ts * 1000 >= sinceMs));
 
   const dispatches = log.filter((record) => record.event === "dispatch");
@@ -313,7 +320,22 @@ export function buildReport(store, options = {}) {
   }
 
   // -- Labels for a wrong route --
-  const underRouting = { retriesBigger: 0, retriesOther: 0, verificationFailed: 0, verificationNotRun: 0, codexFailed: { count: 0, byCode: {} }, stillRunning: 0 };
+  const underRouting = {
+    retriesBigger: 0,
+    retriesOther: 0,
+    verificationFailed: 0,
+    verificationNotRun: 0,
+    verificationJudgedByJev: 0,
+    codexFailed: { count: 0, byCode: {} },
+    stillRunning: 0
+  };
+  // Jev's label for the checks of each finished worker, written by the log hook.
+  const outcomeOfAgent = new Map();
+  for (const record of log) {
+    if (record.event === "verification" && record.agent_id && typeof record.outcome === "string") {
+      outcomeOfAgent.set(record.agent_id, record.outcome);
+    }
+  }
   const firstBySessionAndPrompt = new Map();
   const ordered = [...dispatches].sort((a, b) => (timeOf(a) ?? 0) - (timeOf(b) ?? 0));
   for (const record of ordered) {
@@ -343,6 +365,20 @@ export function buildReport(store, options = {}) {
     }
     if (record.result.startsWith("STILL_RUNNING")) {
       underRouting.stillRunning += 1;
+      continue;
+    }
+    // Jev's label wins when the log hook got one. The hook judged the full
+    // answer, so the label counts also when the logged result was cut before
+    // its Verification line. The word search below stays for older records and
+    // for stops without a label, and it can only read the logged text.
+    const outcome = outcomeOfAgent.get(record.agent_id);
+    if (outcome !== undefined) {
+      underRouting.verificationJudgedByJev += 1;
+      if (outcome === "not_run") {
+        underRouting.verificationNotRun += 1;
+      } else if (outcome === "failed") {
+        underRouting.verificationFailed += 1;
+      }
       continue;
     }
     const verification = verificationText(record.result);
@@ -563,7 +599,9 @@ export function renderText(report) {
   lines.push("");
   lines.push("Labels for a route that was too small (from the log; the other direction needs the offline task set):");
   lines.push(`  Retries of the same brief in one session: ${underRouting.retriesBigger} on a bigger model, ${underRouting.retriesOther} on another route`);
-  lines.push(`  Worker results whose verification names a failure: ${underRouting.verificationFailed} (text match). Verification not run: ${underRouting.verificationNotRun}`);
+  lines.push(
+    `  Worker results whose verification failed: ${underRouting.verificationFailed}. Verification not run: ${underRouting.verificationNotRun}. Judged by Jev: ${underRouting.verificationJudgedByJev}, the rest by a word search`
+  );
   lines.push(`  Codex jobs that failed: ${underRouting.codexFailed.count}: ${pairs(underRouting.codexFailed.byCode)}. Still running when the worker answered: ${underRouting.stillRunning}`);
   lines.push("");
   lines.push("Durations from start to stop:");

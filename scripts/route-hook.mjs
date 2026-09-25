@@ -15,7 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { CODEX_JOB_KIND, DEFAULT_MODEL, FIXED_MODEL_AGENTS, REDIRECTS, WORKER_SET, loadConfig } from "./lib/config.mjs";
+import { CODEX_JOB_KIND, DEFAULT_MODEL, FIXED_MODEL_AGENTS, REDIRECTS, WORKER_SET, WRITER_FAMILY, loadConfig } from "./lib/config.mjs";
 import { existingRequestId, workerPrompt, writeRequest } from "./lib/codex-request.mjs";
 import { lastWriterFamily, recordWriterDispatch } from "./lib/context.mjs";
 import { appendLog, registerSecret, truncate } from "./lib/log.mjs";
@@ -23,20 +23,49 @@ import { CLAUDE_FALLBACK, claudeCapNotice, claudeNotice, claudeState, codexNotic
 import { readRouteLine } from "./lib/route-line.mjs";
 import { completenessShadow, decideModel, decideRoute, writerLockApplies } from "./lib/routing-table.mjs";
 import { askJev, findApiKey } from "./lib/typesafe.mjs";
-import { UNKNOWN_WRITER, activeCodexWriter, writerLockPath } from "./lib/writer-lock.mjs";
+import {
+  CLAUDE_START_MAX_MS,
+  UNKNOWN_WRITER,
+  acquireClaudeWriterLock,
+  activeWriter,
+  checkoutRoot,
+  isClaudeWriter,
+  writerLockPath
+} from "./lib/writer-lock.mjs";
 
 const AGENT_TOOL_NAMES = new Set(["Agent", "Task"]);
 const ORCH_CODEX = path.join(path.dirname(fileURLToPath(import.meta.url)), "orch-codex.mjs");
 
-// In enforce mode, a call that writerLockApplies() names must not start while a
-// detached Codex job still changes files in the same folder.
-function busyWriterDenial(input, finalAgent, config, jevAnswers) {
-  if (config.mode !== "enforce" || !writerLockApplies(finalAgent, jevAnswers)) {
+// In enforce mode, a call that writerLockApplies() names must not start while
+// another writer still changes files in the same checkout: a detached Codex job
+// or a Claude writer. A Claude writer takes the lock here, in one step with the
+// check, so of two writers sent in one message only the first runs.
+// Other writers do not take the lock here: a Codex job takes it when it starts,
+// and an agent type of another owner has no stop that the plugin can trust.
+function busyWriterDenial(input, finalAgent, config, jevAnswers, record) {
+  if (config.mode !== "enforce" || !writerLockApplies(finalAgent, jevAnswers) || !input.cwd) {
     return null;
   }
-  const jobId = activeCodexWriter(input.cwd);
+  let jobId;
+  if (WRITER_FAMILY[finalAgent] === "claude") {
+    jobId = acquireClaudeWriterLock(input.cwd, { sessionId: input.session_id ?? null, toolUseId: input.tool_use_id ?? null, agentType: finalAgent });
+    if (!jobId) {
+      record.writer_lock = "taken";
+    }
+  } else {
+    jobId = activeWriter(input.cwd);
+  }
   if (!jobId) {
     return null;
+  }
+  if (isClaudeWriter(jobId)) {
+    return {
+      jobId,
+      reason:
+        `A Claude writer is still changing files in this checkout (${checkoutRoot(input.cwd)}), and only one writer may run at a time. ` +
+        `Wait until it has finished, then try again. A writer that was sent but did not start stops counting after ${CLAUDE_START_MAX_MS / 1000} seconds. ` +
+        `If you are sure that no writer runs, remove the lock file: ${writerLockPath(input.cwd)}`
+    };
   }
   if (jobId === UNKNOWN_WRITER) {
     return {
@@ -49,7 +78,7 @@ function busyWriterDenial(input, finalAgent, config, jevAnswers) {
   return {
     jobId,
     reason:
-      `The Codex job ${jobId} is still changing files in this folder, and only one writer may run at a time. ` +
+      `The Codex job ${jobId} is still changing files in this checkout, and only one writer may run at a time. ` +
       `Wait for it with: node "${ORCH_CODEX}" wait ${jobId} . Or stop it with: node "${ORCH_CODEX}" cancel ${jobId}`
   };
 }
@@ -300,11 +329,11 @@ async function main() {
 
   // firstNotice() marks a notice as shown for the whole session.
   // A denied call shows no notice. So the lock check runs before the notice.
-  const busy = busyWriterDenial(input, decision.final.agent, config, record.jev);
+  const busy = busyWriterDenial(input, decision.final.agent, config, record.jev, record);
   if (busy) {
     // This is a deliberate "no", not an error, so it does not fall under the fail-open rule.
     record.action = "deny";
-    record.reason = "codex_writer_busy";
+    record.reason = isClaudeWriter(busy.jobId) ? "claude_writer_busy" : "codex_writer_busy";
     record.busy_job = busy.jobId;
     process.stdout.write(
       JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: busy.reason } })

@@ -10,7 +10,7 @@ description: Brief and result formats for the subagent-router workers, and the r
 - Delegate a task only when it is large enough. Each dispatch costs tens of thousands of tokens before any work happens. Do small tasks in the main session.
 - Run only one worker that changes files at a time. All workers share one working tree.
 - Do not start a writer while a review of uncommitted changes runs. The review must see a stable state.
-- While a Codex job still changes files in the folder, the hook denies a new writer or reviewer. The denial names the command to wait for the job and the command to cancel it.
+- While another writer still changes files in the checkout, the hook denies a new writer or reviewer. The other writer is a Codex job or a Claude writer (implementer, debugger). For a Codex job, the denial names the command to wait for the job and the command to cancel it. For a Claude writer, wait until its subagent has finished. Send one writer at a time: of two writers in one message, the second is denied.
 
 ## The brief
 

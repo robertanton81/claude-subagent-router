@@ -124,8 +124,8 @@ export const DEFAULTS = Object.freeze({
   // Codex is opt-in. While this is false, the plugin sends no task to Codex and
   // starts no Codex job: tasks for the Codex workers run on Claude workers.
   codexEnabled: false,
-  // Send the rules from CLAUDE.md along with a Codex task. Codex reads AGENTS.md
-  // only, so without this a task that moves to Codex loses those rules.
+  // Send a snapshot of Claude instruction files with implement and custom
+  // review briefs. Codex does not discover these Claude sources itself.
   codexIncludeUserRules: true,
   codexIncludeProjectRules: true,
   // When the weekly Codex allowance is used up, Codex goes on and pays from bought
@@ -266,8 +266,8 @@ export const CONFIG_SPEC = Object.freeze({
   promptLogChars: { kind: "number", min: 0, max: 200000, about: "how much of a brief the log keeps; 0 keeps briefs out of the log" },
   resultLogChars: { kind: "number", min: 0, max: 200000, about: "how much of a worker answer the log keeps" },
   codexEnabled: { kind: "flag", about: "let the plugin use Codex at all" },
-  codexIncludeUserRules: { kind: "flag", about: "send your personal CLAUDE.md to Codex with an implement brief" },
-  codexIncludeProjectRules: { kind: "flag", about: "send the project CLAUDE.md to Codex with an implement brief" },
+  codexIncludeUserRules: { kind: "flag", about: "send personal Claude instructions and imports with implement and custom review briefs" },
+  codexIncludeProjectRules: { kind: "flag", about: "send project and parent Claude instructions and imports with implement and custom review briefs" },
   codexSpendCredits: { kind: "flag", about: "let a Codex job pay from bought credits once the weekly allowance is used up" },
   routeOtherAgents: { kind: "flag", about: "let the hook set the model of agent types that are not the plugin's own workers" },
   keepModelAgents: { kind: "textList", about: "agent types whose model the hook never changes, by exact name" }

@@ -18,6 +18,10 @@ export function cleanEnv(tempDir, extra = {}) {
     PATH: process.env.PATH,
     HOME: tempDir,
     ORCH_DATA_DIR: path.join(tempDir, "data"),
+    // Hide host instruction files when the runner walks ancestors. This test
+    // preload also rejects a file read that escapes the temporary root.
+    ORCH_TEST_INSTRUCTION_ROOT: tempDir,
+    NODE_OPTIONS: `--import=${JSON.stringify(path.join(ROOT, "tests", "instruction-fixture.mjs"))}`,
     // Codex is off by default. Most tests are about Codex, so they turn it on.
     // A test of the default passes ORCH_CODEX_ENABLED: "" in `extra`.
     ORCH_CODEX_ENABLED: "1",
@@ -36,7 +40,13 @@ export function runNode(script, { args = [], stdin = "", env, cwd } = {}) {
     child.stdout.on("data", (chunk) => (stdout += chunk));
     child.stderr.on("data", (chunk) => (stderr += chunk));
     child.on("error", reject);
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.on("close", (code) => {
+      if (env?.ORCH_TEST_INSTRUCTION_ROOT && fs.existsSync(path.join(env.ORCH_TEST_INSTRUCTION_ROOT, ".instruction-read-violation"))) {
+        reject(new Error("Child process attempted an instruction read outside its fixture"));
+        return;
+      }
+      resolve({ code, stdout, stderr });
+    });
     child.stdin.end(stdin);
   });
 }

@@ -136,15 +136,27 @@ test("CLAUDE.md rules of the user and the project travel with an implement brief
     const project = path.join(tempDir, "project");
     fs.mkdirSync(project);
     fs.writeFileSync(path.join(project, "CLAUDE.md"), "PROJECT RULE: run npm test");
+    fs.mkdirSync(path.join(tempDir, ".claude", "rules"));
+    fs.writeFileSync(path.join(tempDir, ".claude", "rules", "style.md"), "USER STYLE: short functions");
+    fs.writeFileSync(path.join(project, "CLAUDE.local.md"), "@extra.md");
+    fs.writeFileSync(path.join(project, "extra.md"), "IMPORTED LOCAL: run lint");
+    const child = path.join(project, "src");
+    fs.mkdirSync(child);
+    fs.mkdirSync(path.join(project, ".git"));
 
-    const result = await runNode(CLI, { args: ["implement", "--wait", "20"], stdin: "Goal: x", env, cwd: project });
+    const result = await runNode(CLI, { args: ["implement", "--wait", "20"], stdin: "Goal: x", env, cwd: child });
     assert.ok(result.stdout.includes("USER RULE: never log secrets"));
     assert.ok(result.stdout.includes("PROJECT RULE: run npm test"));
+    assert.ok(result.stdout.includes("USER STYLE: short functions"));
+    assert.ok(result.stdout.includes("IMPORTED LOCAL: run lint"));
+    const review = await runNode(CLI, { args: ["review", "--custom", "--wait", "20"], stdin: "Review this task", env, cwd: child });
+    assert.ok(review.stdout.includes("IMPORTED LOCAL: run lint"), "custom reviews receive the same snapshot");
 
     fs.mkdirSync(path.join(tempDir, "data"), { recursive: true });
     fs.writeFileSync(path.join(tempDir, "data", "config.json"), JSON.stringify({ codexIncludeUserRules: false }));
     const withoutUserRules = await runNode(CLI, { args: ["implement", "--wait", "20"], stdin: "Goal: x", env, cwd: project });
     assert.ok(!withoutUserRules.stdout.includes("USER RULE"));
+    assert.ok(!withoutUserRules.stdout.includes("USER STYLE"));
     assert.ok(withoutUserRules.stdout.includes("PROJECT RULE"));
   });
 });

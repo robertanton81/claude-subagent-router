@@ -22,10 +22,10 @@
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { claudeRules } from "./lib/claude-rules.mjs";
 import { RESULT_CONTRACT, UsageError, parseOptions, sendsBriefToCodex } from "./lib/codex-args.mjs";
 import { isUsageLimitMessage } from "./lib/codex-availability.mjs";
 import { readEvents } from "./lib/codex-events.mjs";
@@ -38,6 +38,7 @@ import {
   UNKNOWN_WRITER,
   acquireWriterLock,
   codexIsAlive,
+  isClaudeWriter,
   jobsDir,
   pidJobState,
   readPidFile,
@@ -51,7 +52,6 @@ const RUNNER = path.join(path.dirname(SELF), "codex-job-runner.mjs");
 const DEFAULT_WAIT_SECONDS = 540;
 const KEEP_MS = 14 * 24 * 3600 * 1000;
 const JOB_ID_PATTERN = /^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$/;
-const RULES_MAX_CHARS = 16000;
 
 function readStdin() {
   if (process.stdin.isTTY) {
@@ -98,72 +98,12 @@ function pruneOld() {
   }
 }
 
-// Codex reads AGENTS.md, not CLAUDE.md. When a task moves from a Claude worker to
-// Codex, the rules in CLAUDE.md would be lost. So they travel with the brief.
-// Returns the text and the notes for job.json: which files went along, and what went wrong.
-function claudeRules(cwd, config) {
-  const files = [];
-  if (config.codexIncludeUserRules) {
-    files.push(path.join(os.homedir(), ".claude", "CLAUDE.md"));
-  }
-  if (config.codexIncludeProjectRules) {
-    files.push(path.join(cwd, "CLAUDE.md"), path.join(cwd, ".claude", "CLAUDE.md"));
-  }
-  const parts = [];
-  const notes = [];
-  for (const file of files) {
-    try {
-      const outside = projectFileLeavesFolder(file, cwd);
-      if (outside) {
-        // A cloned repository can hold a CLAUDE.md link to any file on this
-        // machine. Its target would travel to Codex, so it is skipped.
-        notes.push(`${file}: NOT included (${outside})`);
-        process.stderr.write(`subagent-router: the rules file ${file} was skipped: ${outside}\n`);
-        continue;
-      }
-      const text = fs.readFileSync(file, "utf8").trim();
-      if (!text) {
-        continue;
-      }
-      const cut = text.length > RULES_MAX_CHARS;
-      parts.push(`### Rules from ${file}\n\n${cut ? `${text.slice(0, RULES_MAX_CHARS)}\n\n[This file was cut after ${RULES_MAX_CHARS} characters.]` : text}`);
-      notes.push(cut ? `${file}: included, cut after ${RULES_MAX_CHARS} characters` : `${file}: included`);
-    } catch (error) {
-      if (error.code !== "ENOENT") {
-        // The file exists but cannot be read. Codex would run without these rules, so say so.
-        notes.push(`${file}: NOT included (${error.code ?? error.message})`);
-        process.stderr.write(`subagent-router: the rules file ${file} could not be read: ${error.message}\n`);
-      }
-    }
-  }
-  const text = parts.length === 0 ? "" : `\n\n---\nThe rules below come from the CLAUDE.md files of this user and project. They apply to this task.\n\n${parts.join("\n\n")}\n`;
-  return { text, notes };
-}
-
-// For a rules file inside the project folder: the reason to skip it, or null.
-// The file must resolve to a regular file inside the real project folder. The
-// user's own file in the home folder is trusted and not checked here.
-// A missing file returns null, so the read reports ENOENT as before.
-function projectFileLeavesFolder(file, cwd) {
-  if (!file.startsWith(cwd + path.sep)) {
-    return null;
-  }
-  let real;
-  try {
-    real = fs.realpathSync(file);
-  } catch (error) {
-    return error.code === "ENOENT" ? null : `cannot resolve it: ${error.code ?? error.message}`;
-  }
-  const root = fs.realpathSync(cwd);
-  if (!real.startsWith(root + path.sep)) {
-    return "it points outside the project folder";
-  }
-  return fs.statSync(real).isFile() ? null : "it is not a regular file";
-}
-
 // Why a start was refused. A holder that cannot be named gets no `wait` or
 // `cancel` command, because those commands refuse an id that is not a job id.
 function busyText(holder, cwd) {
+  if (isClaudeWriter(holder)) {
+    return `a Claude writer of a Claude Code session is still changing files in the checkout of ${cwd}. Wait until it has finished, then try again. If you are sure that no writer runs, remove the lock file: ${writerLockPath(cwd)}`;
+  }
   if (holder === UNKNOWN_WRITER) {
     return (
       `the writer lock of ${cwd} is held, but its job cannot be named: the lock cannot be read, or another start was removing an old lock. ` +

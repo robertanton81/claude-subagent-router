@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2
+
+- Codex implement tasks and custom reviews now receive personal rules, parent and local instructions, recursive project rules, and allowed imports. Path conditions remain attached to rules. Skipped files and size limits are reported.
+
+- The writer lock now covers the whole checkout, the root of the git working tree, not only the exact folder. Before, a Codex job in `repo/sub` did not stop a writer in `repo`, although both change the same files.
+- The plugin's Claude writers (`implementer`, `debugger`) now take the writer lock too, in `enforce` mode. Before, only Codex jobs held it, so two background Claude writers, or a Claude writer and a Codex job, could change the same checkout at once. A second writer, a reviewer or a Codex job now waits until the Claude writer's subagent has stopped. The dispatch log names the new denial `claude_writer_busy`.
+
 ## 0.3.1
 
 - The report counts the dispatches where the orchestrator named a model, and how often the hook ran another one, down or up, by pair. A move to or from a Codex worker is counted apart, because Haiku only runs the Codex wrapper.

@@ -9,7 +9,21 @@ import path from "node:path";
 import test, { mock } from "node:test";
 
 import { restoreRequest, writeRequest } from "../scripts/lib/codex-request.mjs";
-import { acquireWriterLock, activeCodexWriter, jobsDir, releaseWriterLock, writerLockPath } from "../scripts/lib/writer-lock.mjs";
+import { pathToFileURL } from "node:url";
+
+import {
+  CLAUDE_START_MAX_MS,
+  CLAUDE_WRITER_MAX_MS,
+  acquireClaudeWriterLock,
+  acquireWriterLock,
+  activeWriter,
+  confirmClaudeWriterLock,
+  isClaudeWriter,
+  jobsDir,
+  releaseClaudeWriterLock,
+  releaseWriterLock,
+  writerLockPath
+} from "../scripts/lib/writer-lock.mjs";
 import { ROOT, cleanEnv, makeTempDir, runNode } from "./helpers.mjs";
 
 const RUNNER = path.join(ROOT, "scripts", "codex-job-runner.mjs");
@@ -56,7 +70,7 @@ test("the lock is held from the start on, before the runner has written its pid"
 
     // Job B starts in the same moment. Before the fix it took the lock as stale, and both ran.
     assert.equal(acquireWriterLock(project, jobB, env), jobA);
-    assert.equal(activeCodexWriter(project, env), jobA);
+    assert.equal(activeWriter(project, env), jobA);
 
     // When the process that started A is gone and A has no runner, the lock is stale, and B takes it.
     const lockDir = path.join(tempDir, "data", "locks");
@@ -66,26 +80,26 @@ test("the lock is held from the start on, before the runner has written its pid"
     assert.equal(lock.starter_pid, process.pid, "the lock names the process that took it");
     fs.writeFileSync(lockPath, JSON.stringify({ ...lock, starter_pid: deadPid() }));
     assert.equal(acquireWriterLock(project, jobB, env), null);
-    assert.equal(activeCodexWriter(project, env), jobB);
+    assert.equal(activeWriter(project, env), jobB);
     assert.deepEqual(fs.readdirSync(lockDir), [lockName], "the stale lock left no file behind");
 
     // Just under the bound, a lock with a live starter and no runner still holds.
     // The starter of B is this process. Without this case, a wider bound would pass unseen.
     const youngLock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
     fs.writeFileSync(lockPath, JSON.stringify({ ...youngLock, created_at: new Date(Date.now() - 14 * 60 * 1000).toISOString() }));
-    assert.equal(activeCodexWriter(project, env), jobB, "fourteen minutes is inside the bound of fifteen");
+    assert.equal(activeWriter(project, env), jobB, "fourteen minutes is inside the bound of fifteen");
 
     // A starter is gone after 570 seconds at the latest. A lock that is older and
     // has no runner is stale, also when its pid is alive again in another program.
     const oldLock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
     fs.writeFileSync(lockPath, JSON.stringify({ ...oldLock, starter_pid: process.pid, created_at: new Date(Date.now() - 20 * 60 * 1000).toISOString() }));
-    assert.equal(activeCodexWriter(project, env), null, "a starter cannot be that old");
+    assert.equal(activeWriter(project, env), null, "a starter cannot be that old");
     assert.equal(acquireWriterLock(project, jobA, env), null);
-    assert.equal(activeCodexWriter(project, env), jobA);
+    assert.equal(activeWriter(project, env), jobA);
 
     // A finished job frees the folder, whatever its starter does.
     fs.writeFileSync(path.join(jobsDir(env), jobA, "exit-code"), "0");
-    assert.equal(activeCodexWriter(project, env), null);
+    assert.equal(activeWriter(project, env), null);
     releaseWriterLock(project, jobA, env);
     assert.deepEqual(fs.readdirSync(lockDir), []);
   });
@@ -131,7 +145,7 @@ test("a start that judged a lock dead does not take it from a start that recover
     } finally {
       read.mock.restore();
     }
-    assert.equal(activeCodexWriter(project, env), jobC, "C still holds the checkout it took");
+    assert.equal(activeWriter(project, env), jobC, "C still holds the checkout it took");
     assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf8")).job_id, jobC, "C's lock is the one on disk");
     assert.deepEqual(fs.readdirSync(lockDir), [lockName], "no leftover file from the attempt");
   });
@@ -175,12 +189,12 @@ test("a job that gives back its lock cannot delete the lock that a new start has
     // win and only the else branch runs. The first branch is kept on purpose:
     // it is the one that fails when the release loses the breaker again.
     if (heldByC) {
-      assert.equal(activeCodexWriter(project, env), jobC, "C believes that it holds the folder, so its lock must be on disk");
+      assert.equal(activeWriter(project, env), jobC, "C believes that it holds the folder, so its lock must be on disk");
     } else {
       assert.deepEqual(fs.readdirSync(lockDir), [], "C was told to wait, and A's lock is gone");
       assert.equal(acquireWriterLock(project, jobC, env), null, "C takes the folder on its next try");
     }
-    assert.equal(activeCodexWriter(project, env), jobC);
+    assert.equal(activeWriter(project, env), jobC);
   });
 });
 
@@ -223,7 +237,7 @@ test("an error after the start of Codex stops Codex before the job ends, and fre
       await sleep(200);
       const pid = codexPid();
       assert.ok(pid === null || !isAlive(pid), `Codex (pid ${pid}) must be dead when the job has ended`);
-      assert.equal(activeCodexWriter(project, env), null, "the lock is free once the job has ended");
+      assert.equal(activeWriter(project, env), null, "the lock is free once the job has ended");
       assert.ok(fs.statSync(path.join(jobDir, "codex.pid")).isDirectory(), "the runner did not replace the folder");
     } finally {
       const pid = codexPid();
@@ -263,7 +277,7 @@ test("a Codex that runs past max_run_minutes is stopped, the job ends with 124, 
       assert.ok(pid !== null, "Codex had started");
       await sleep(200);
       assert.ok(!isAlive(pid), `Codex (pid ${pid}) must be dead when the job has ended`);
-      assert.equal(activeCodexWriter(project, env), null, "the lock is free once the job has ended");
+      assert.equal(activeWriter(project, env), null, "the lock is free once the job has ended");
     } finally {
       const pid = codexPid();
       if (pid && isAlive(pid)) {
@@ -382,7 +396,7 @@ test("a lock that cannot be read is not taken from its owner, but does not block
     // content is not. The checkout must stay taken.
     fs.writeFileSync(lockPath, "");
     assert.equal(acquireWriterLock(cwd, "jobB", env), "unknown", "a lock being written is not a free lock");
-    assert.equal(activeCodexWriter(cwd, env), "unknown", "the checkout still counts as busy");
+    assert.equal(activeWriter(cwd, env), "unknown", "the checkout still counts as busy");
 
     // Half a written record, which is the same situation.
     fs.writeFileSync(lockPath, '{"job_id": "jobA", "starter');
@@ -417,7 +431,7 @@ test("a pid that a later program reuses does not hold the folder; the real runne
     // their pids now belong to other programs: here, this test process.
     fs.writeFileSync(path.join(jobDir, "runner.pid"), String(process.pid));
     fs.writeFileSync(path.join(jobDir, "codex.pid"), String(process.pid));
-    assert.equal(activeCodexWriter(project, env), null, "a reused pid must not hold the folder");
+    assert.equal(activeWriter(project, env), null, "a reused pid must not hold the folder");
 
     const runner = startStandIn(jobDir);
     const codex = startStandIn(path.join(jobDir, "result.md"));
@@ -425,14 +439,14 @@ test("a pid that a later program reuses does not hold the folder; the real runne
       await new Promise((resolve) => setTimeout(resolve, 200));
       // The live runner holds the folder.
       fs.writeFileSync(path.join(jobDir, "runner.pid"), String(runner.pid));
-      assert.equal(activeCodexWriter(project, env), jobId);
+      assert.equal(activeWriter(project, env), jobId);
       // Codex that outlived its runner holds it too.
       fs.writeFileSync(path.join(jobDir, "runner.pid"), String(process.pid));
       fs.writeFileSync(path.join(jobDir, "codex.pid"), String(codex.pid));
-      assert.equal(activeCodexWriter(project, env), jobId);
+      assert.equal(activeWriter(project, env), jobId);
       // The runner's command line does not count as Codex's: it has no result.md.
       fs.writeFileSync(path.join(jobDir, "codex.pid"), String(runner.pid));
-      assert.equal(activeCodexWriter(project, env), null);
+      assert.equal(activeWriter(project, env), null);
     } finally {
       runner.kill("SIGKILL");
       codex.kill("SIGKILL");
@@ -455,11 +469,96 @@ test("a ps that fails counts the pid as alive, so the folder stays held", async 
     const realPath = process.env.PATH;
     process.env.PATH = `${bin}${path.delimiter}${realPath}`;
     try {
-      assert.equal(activeCodexWriter(project, env), jobId);
+      assert.equal(activeWriter(project, env), jobId);
     } finally {
       process.env.PATH = realPath;
     }
     // With the real ps the same pid is seen as another program's.
-    assert.equal(activeCodexWriter(project, env), null);
+    assert.equal(activeWriter(project, env), null);
   });
+});
+
+test("a lock taken in a sub-folder holds the whole checkout, and a linked worktree is a checkout of its own", async () => {
+  await withTemp(({ tempDir, env, project }) => {
+    fs.mkdirSync(path.join(project, ".git"));
+    const sub = path.join(project, "src", "lib");
+    fs.mkdirSync(sub, { recursive: true });
+    // A linked worktree has a .git file that points at the main repository.
+    const worktree = path.join(tempDir, "worktree");
+    fs.mkdirSync(worktree);
+    fs.writeFileSync(path.join(worktree, ".git"), `gitdir: ${project}/.git/worktrees/worktree\n`);
+
+    const jobA = "20260925-100000-aaaaaa";
+    fs.mkdirSync(path.join(jobsDir(env), jobA), { recursive: true });
+    assert.equal(acquireWriterLock(sub, jobA, env), null);
+    // Before, the lock of repo/src/lib was a different file from the lock of repo.
+    assert.equal(activeWriter(project, env), jobA, "a writer at the root sees the job in the sub-folder");
+    assert.equal(acquireWriterLock(project, "20260925-100000-bbbbbb", env), jobA);
+    assert.equal(activeWriter(worktree, env), null, "another worktree has its own files");
+    const jobW = "20260925-100000-cccccc";
+    fs.mkdirSync(path.join(jobsDir(env), jobW), { recursive: true });
+    assert.equal(acquireWriterLock(worktree, jobW, env), null, "and a writer there does not wait for the main checkout");
+    assert.equal(activeWriter(project, env), jobA);
+    releaseWriterLock(project, jobA, env);
+    assert.equal(activeWriter(sub, env), null, "the job gives back the lock from the root too");
+  });
+});
+
+test("a Claude writer holds the checkout against Claude writers and Codex jobs until its subagent stops", async () => {
+  await withTemp(({ tempDir, env, project }) => {
+    const writer = "subagent-router:implementer";
+    const lockPath = writerLockPath(project, env);
+    const shift = (field, ms) => {
+      const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+      fs.writeFileSync(lockPath, JSON.stringify({ ...lock, [field]: new Date(Date.now() - ms).toISOString() }));
+    };
+
+    assert.equal(acquireClaudeWriterLock(project, { sessionId: "s1", toolUseId: "toolu_1", agentType: writer }, env, process.pid), null);
+    const holder = activeWriter(project, env);
+    assert.ok(isClaudeWriter(holder), holder);
+    assert.equal(acquireClaudeWriterLock(project, { sessionId: "s1", toolUseId: "toolu_2", agentType: writer }, env, process.pid), holder, "a second writer sent in the same message waits");
+    const jobA = "20260925-110000-aaaaaa";
+    fs.mkdirSync(path.join(jobsDir(env), jobA), { recursive: true });
+    assert.equal(acquireWriterLock(project, jobA, env), holder, "a Codex job waits too");
+
+    // A dispatch whose subagent never starts stops holding the checkout soon.
+    shift("created_at", CLAUDE_START_MAX_MS + 1000);
+    assert.equal(activeWriter(project, env), null);
+    shift("created_at", 0);
+
+    // The same session waits for a writer in a second checkout. A subagent that
+    // starts there must confirm that lock, not the first one.
+    const other = path.join(tempDir, "other");
+    fs.mkdirSync(other);
+    assert.equal(acquireClaudeWriterLock(other, { sessionId: "s1", toolUseId: "toolu_9", agentType: writer }, env, process.pid), null);
+    assert.equal(confirmClaudeWriterLock({ cwd: other, sessionId: "s1", agentType: writer, agentId: "a9" }, env), true);
+    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf8")).agent_id, undefined, "the lock of the first checkout still waits for its own subagent");
+
+    assert.equal(confirmClaudeWriterLock({ cwd: project, sessionId: "s2", agentType: writer, agentId: "a1" }, env), false, "another session's subagent is not this writer");
+    assert.equal(confirmClaudeWriterLock({ cwd: project, sessionId: "s1", agentType: writer, agentId: "a1" }, env), true);
+    shift("created_at", CLAUDE_START_MAX_MS + 1000);
+    assert.equal(activeWriter(project, env), holder, "a started subagent holds the checkout past the start window");
+
+    assert.equal(releaseClaudeWriterLock("a-other", env), true);
+    assert.equal(activeWriter(project, env), holder, "another subagent's stop gives back nothing");
+    assert.equal(releaseClaudeWriterLock("a1", env), true);
+    assert.equal(activeWriter(project, env), null);
+    assert.equal(fs.existsSync(lockPath), false);
+
+    // A lock whose session has ended, or whose subagent never stopped, does not block for ever.
+    assert.equal(acquireClaudeWriterLock(project, { sessionId: "s3", toolUseId: "toolu_3", agentType: writer }, env, deadPid()), null);
+    assert.equal(activeWriter(project, env), null, "the Claude Code process of the session is gone");
+    assert.equal(acquireClaudeWriterLock(project, { sessionId: "s4", toolUseId: "toolu_4", agentType: writer }, env, process.pid), null);
+    assert.equal(confirmClaudeWriterLock({ cwd: project, sessionId: "s4", agentType: writer, agentId: "a4" }, env), true);
+    shift("started_at", CLAUDE_WRITER_MAX_MS + 1000);
+    assert.equal(activeWriter(project, env), null);
+  });
+});
+
+test("the session process of a hook is found through a shell that started it", () => {
+  const lock = pathToFileURL(path.join(ROOT, "scripts", "lib", "writer-lock.mjs")).href;
+  const script = `import { sessionProcessPid } from "${lock}"; console.log(sessionProcessPid());`;
+  // "; exit 0" keeps the shell alive as the hook's parent, instead of letting it exec the hook.
+  const result = spawnSync("/bin/sh", ["-c", `"${process.execPath}" --input-type=module -e '${script}'; exit 0`], { encoding: "utf8" });
+  assert.equal(result.stdout.trim(), String(process.pid), result.stderr);
 });

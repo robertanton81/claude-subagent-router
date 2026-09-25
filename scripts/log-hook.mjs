@@ -8,11 +8,12 @@
 
 import fs from "node:fs";
 
-import { REVIEWER_SET, WORKER_SET, loadConfig } from "./lib/config.mjs";
+import { REVIEWER_SET, WORKER_SET, WRITER_FAMILY, loadConfig } from "./lib/config.mjs";
 import { recordWriterLaunch, recordWriterStop } from "./lib/context.mjs";
 import { countFindings, reportsNoWrite, verificationText } from "./lib/findings.mjs";
 import { appendLog, registerSecret, truncate } from "./lib/log.mjs";
 import { askVerification, findApiKey } from "./lib/typesafe.mjs";
+import { confirmClaudeWriterLock, releaseClaudeWriterLock } from "./lib/writer-lock.mjs";
 
 // Claude Code stops this hook after 5 seconds (hooks/hooks.json). The Jev call
 // must end well before that, whatever `jevTimeoutMs` says.
@@ -98,9 +99,16 @@ async function main() {
       recordWriterLaunch(base.session_id, record.tool_use_id, record.final.agent, record.agent_id);
       break;
     }
-    case "SubagentStart":
-      appendLog({ ...base, event: "start", agent_id: input.agent_id ?? null, agent_type: input.agent_type ?? null });
+    case "SubagentStart": {
+      const record = { ...base, event: "start", agent_id: input.agent_id ?? null, agent_type: input.agent_type ?? null };
+      // The route hook took the writer lock for this subagent in enforce mode.
+      // "missing" in the log means that this writer runs without the lock.
+      if (WRITER_FAMILY[record.agent_type] === "claude" && config.mode === "enforce") {
+        record.writer_lock = confirmClaudeWriterLock({ cwd: base.cwd, sessionId: base.session_id, agentType: record.agent_type, agentId: record.agent_id }) ? "confirmed" : "missing";
+      }
+      appendLog(record);
       break;
+    }
     case "SubagentStop":
       // Claude Code also fires this event for its own helper runs, such as the
       // short activity line it writes for a running subagent every half minute.
@@ -111,6 +119,11 @@ async function main() {
         break;
       }
       appendLog({ ...base, ...stopRecord(input, config) });
+      // Before the Jev call below, which can take seconds: the next writer
+      // should not wait for a label.
+      if (WRITER_FAMILY[input.agent_type] === "claude" && !releaseClaudeWriterLock(input.agent_id)) {
+        process.stderr.write("subagent-router: the writer lock of this subagent was not given back, because another process held its breaker; it counts until the session ends or for one hour\n");
+      }
       recordWriterStop(base.session_id, input.agent_type, input.agent_id, reportsNoWrite(input.last_assistant_message));
       await logVerification(input, config, base);
       break;

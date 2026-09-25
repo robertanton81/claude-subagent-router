@@ -935,6 +935,52 @@ test("an agent type of another owner is denied while a Codex job writes, when Je
   });
 });
 
+test("a second writer, a review and a Codex job wait while a Claude writer runs in the same checkout", async () => {
+  await withJev({ body: jevBody({ kind: "implement", difficulty: 1 }) }, async ({ jev, tempDir, env }) => {
+    const project = path.join(tempDir, "project");
+    const sub = path.join(project, "src");
+    fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+    fs.mkdirSync(sub);
+    const log = "scripts/log-hook.mjs";
+    const subagent = (event) => runNode(log, { env, stdin: JSON.stringify({ session_id: "session-1", cwd: project, agent_id: "a1", agent_type: "subagent-router:implementer", ...event }) });
+
+    const first = await runNode(HOOK, { stdin: agentCall({ cwd: project }), env });
+    assert.ok(!first.stdout.includes('"deny"'), first.stdout);
+    assert.deepEqual([readLog(tempDir)[0].final.agent, readLog(tempDir)[0].writer_lock], ["subagent-router:implementer", "taken"]);
+
+    // A second writer, sent from a sub-folder of the same checkout.
+    const second = JSON.parse((await runNode(HOOK, { stdin: agentCall({ cwd: sub, tool_use_id: "toolu_2" }), env })).stdout).hookSpecificOutput;
+    assert.equal(second.permissionDecision, "deny");
+    assert.match(second.permissionDecisionReason, /A Claude writer is still changing files/);
+    assert.ok(second.permissionDecisionReason.includes(writerLockPath(project, env)), second.permissionDecisionReason);
+    assert.deepEqual([readLog(tempDir)[1].reason, readLog(tempDir)[1].busy_job], ["claude_writer_busy", "claude:toolu_1"]);
+
+    await subagent({ hook_event_name: "SubagentStart" });
+    assert.equal(readLog(tempDir).at(-1).writer_lock, "confirmed");
+
+    jev.state.reply = { body: jevBody({ kind: "review", writes: 0.02 }) };
+    const review = JSON.parse(agentCall({ cwd: project, tool_use_id: "toolu_3" }));
+    review.tool_input.subagent_type = "subagent-router:reviewer";
+    assert.equal(JSON.parse((await runNode(HOOK, { stdin: JSON.stringify(review), env })).stdout).hookSpecificOutput.permissionDecision, "deny");
+
+    const fakeCodex = path.join(tempDir, "fake-codex.cjs");
+    fs.writeFileSync(fakeCodex, '#!/usr/bin/env node\nif (process.argv[2] === "login") { process.stderr.write("Logged in using ChatGPT\\n"); process.exit(0); }\n', { mode: 0o755 });
+    const codex = await runNode("scripts/orch-codex.mjs", { args: ["implement", "--wait", "0.5"], stdin: "Goal: x", env: { ...env, ORCH_CODEX_BIN: fakeCodex }, cwd: project });
+    assert.notEqual(codex.code, 0);
+    assert.match(codex.stdout, /writer_busy: a Claude writer/);
+
+    await subagent({ hook_event_name: "SubagentStop", last_assistant_message: "Changed files: src/a.js" });
+    jev.state.reply = { body: jevBody({ kind: "implement", difficulty: 1 }) };
+    const after = await runNode(HOOK, { stdin: agentCall({ cwd: project, tool_use_id: "toolu_4" }), env });
+    assert.ok(!after.stdout.includes('"deny"'), "the checkout is free once the subagent has stopped");
+
+    // Shadow mode takes no lock and denies nothing.
+    const shadowEnv = { ...env, ORCH_MODE: "shadow" };
+    const shadow = await runNode(HOOK, { stdin: agentCall({ cwd: project, tool_use_id: "toolu_5" }), env: shadowEnv });
+    assert.ok(!shadow.stdout.includes('"deny"'), shadow.stdout);
+  });
+});
+
 test("a lock that cannot be read denies with its path, not with a wait command for the job id unknown", async () => {
   await withJev({ body: jevBody({ kind: "implement" }) }, async ({ tempDir, env }) => {
     const project = path.join(tempDir, "project");

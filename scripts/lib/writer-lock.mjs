@@ -1,8 +1,20 @@
-// One lock per working folder for Codex jobs that change files.
+// One writer lock per checkout, for every writer that the plugin starts.
 //
-// A Codex job runs as a detached process. It keeps writing even when the worker
-// that started it has stopped. Without a lock the orchestrator could start a
-// second writer, or a review, in the same folder while Codex still edits it.
+// A checkout is the root of the git working tree that holds the folder, or the
+// folder itself outside git. Before, the lock was keyed by the exact folder, so a
+// Codex job in `repo/sub` did not stop a writer in `repo`, although both change
+// the same files. Two worktrees of one repository are two checkouts.
+//
+// Two kinds of writer take the lock:
+//   - A Codex job. It runs as a detached process and keeps writing even when the
+//     worker that started it has stopped. orch-codex.mjs takes the lock.
+//   - A Claude writer (implementer, debugger). The route hook takes the lock
+//     when it lets the dispatch through, the log hook confirms it when the
+//     subagent starts and gives it back when the subagent stops. A background
+//     subagent runs next to the session, so without this lock a second writer,
+//     a review or a Codex job could start in the same checkout.
+//
+// The rest of this comment is about Codex jobs.
 //
 // The lock names the job and the process that started it. It counts as held
 // while the job has no exit code and one of three processes is alive: the
@@ -37,15 +49,35 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function lockFile(cwd, env) {
+// The folder that one lock covers: the nearest folder at or above `cwd` that
+// holds a `.git` entry, or `cwd` itself when there is none. A `.git` file
+// counts too, because a linked worktree and a submodule have one. This looks at
+// the file system only, so the route hook starts no `git` process for it.
+export function checkoutRoot(cwd) {
   let real = cwd;
   try {
     real = fs.realpathSync(cwd);
   } catch {
     // The folder is gone. Use the path as it was given.
+    return cwd;
   }
-  const name = crypto.createHash("sha256").update(real).digest("hex").slice(0, 16);
-  return path.join(dataDir(env), "locks", `${name}.json`);
+  for (let current = real; ; current = path.dirname(current)) {
+    if (fs.existsSync(path.join(current, ".git"))) {
+      return current;
+    }
+    if (path.dirname(current) === current) {
+      return real;
+    }
+  }
+}
+
+function locksDir(env) {
+  return path.join(dataDir(env), "locks");
+}
+
+function lockFile(cwd, env) {
+  const name = crypto.createHash("sha256").update(checkoutRoot(cwd)).digest("hex").slice(0, 16);
+  return path.join(locksDir(env), `${name}.json`);
 }
 
 function processIsAlive(pid) {
@@ -139,6 +171,9 @@ function jobIsActive(lock, env, now = Date.now()) {
   if (lock.unreadable) {
     return true;
   }
+  if (lock.kind === "claude") {
+    return claudeWriterIsActive(lock, now);
+  }
   const dir = path.join(jobsDir(env), lock.job_id);
   if (!fs.existsSync(dir) || fs.existsSync(path.join(dir, "exit-code"))) {
     return false;
@@ -180,8 +215,10 @@ function readLock(file) {
   return fs.existsSync(file) ? unreadableLockHolder(file) : null;
 }
 
-// The id of the Codex job that is changing files in `cwd` right now, or null.
-export function activeCodexWriter(cwd, env = process.env) {
+// The id of the writer that is changing files in the checkout of `cwd` right
+// now, or null: a Codex job id, a Claude writer id (see isClaudeWriter()), or
+// UNKNOWN_WRITER.
+export function activeWriter(cwd, env = process.env) {
   if (!cwd) {
     return null;
   }
@@ -274,6 +311,10 @@ const BREAKER_POLL_MS = 50;
 // The lock is held from this moment on, because it records the pid of the process
 // that took it. The caller's job folder must exist already.
 export function acquireWriterLock(cwd, jobId, env = process.env, starterPid = process.pid) {
+  return takeLock(cwd, { job_id: jobId, starter_pid: starterPid }, env);
+}
+
+function takeLock(cwd, fields, env) {
   const file = lockFile(cwd, env);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const deadline = Date.now() + BREAKER_WAIT_MS;
@@ -286,7 +327,7 @@ export function acquireWriterLock(cwd, jobId, env = process.env, starterPid = pr
     // and the lock path never exists with anything but its whole content.
     const fresh = `${file}.new-${process.pid}-${attempt}`;
     try {
-      fs.writeFileSync(fresh, JSON.stringify({ job_id: jobId, cwd, starter_pid: starterPid, created_at: new Date().toISOString() }), { mode: 0o600 });
+      fs.writeFileSync(fresh, JSON.stringify({ ...fields, cwd, root: checkoutRoot(cwd), created_at: new Date().toISOString() }), { mode: 0o600 });
       fs.linkSync(fresh, file);
       return null;
     } catch (error) {
@@ -311,7 +352,7 @@ export function acquireWriterLock(cwd, jobId, env = process.env, starterPid = pr
       sleepSync(BREAKER_POLL_MS);
     }
   }
-  return activeCodexWriter(cwd, env) ?? UNKNOWN_WRITER;
+  return activeWriter(cwd, env) ?? UNKNOWN_WRITER;
 }
 
 // Gives back the lock of `jobId`, and only that lock. The look and the removal
@@ -321,7 +362,10 @@ export function acquireWriterLock(cwd, jobId, env = process.env, starterPid = pr
 // breaker stayed busy; the lock then stays, and since its job has ended, the
 // next start removes it as dead.
 export function releaseWriterLock(cwd, jobId, env = process.env) {
-  const file = lockFile(cwd, env);
+  return releaseLockFile(lockFile(cwd, env), jobId);
+}
+
+function releaseLockFile(file, jobId) {
   // No lock, nothing to give back. A lock of this job cannot appear later.
   if (!fs.existsSync(file)) {
     return true;
@@ -342,4 +386,143 @@ export function releaseWriterLock(cwd, jobId, env = process.env) {
   } finally {
     dropBreaker(file);
   }
+}
+
+// ---- Claude writers ----
+
+// The id of a Claude writer in a lock. It can never be a Codex job id, so the
+// `wait` and `cancel` commands refuse it, and messages say what to do instead.
+const CLAUDE_WRITER_PREFIX = "claude:";
+
+export function isClaudeWriter(holder) {
+  return typeof holder === "string" && holder.startsWith(CLAUDE_WRITER_PREFIX);
+}
+
+// A Claude writer's lock that no subagent has confirmed yet stops counting after
+// this time. A dispatch that the user refuses, or that fails before its subagent
+// starts, never reaches SubagentStart. Its lock must not stop the next writer
+// for long. A start takes about a second, and calls sent in one message are
+// checked within that time.
+export const CLAUDE_START_MAX_MS = 30 * 1000;
+
+// A confirmed Claude writer's lock stops counting after this time, in case its
+// SubagentStop never comes (a subagent that is killed, a log hook that fails).
+// The longest run of a plugin writer in the dispatch log up to 2026-09-25 took
+// four minutes. A writer that runs longer than this is not protected any more.
+export const CLAUDE_WRITER_MAX_MS = 60 * 60 * 1000;
+
+// A Claude writer runs inside the Claude Code process of its session. When that
+// process is gone, so is the writer.
+function claudeWriterIsActive(lock, now) {
+  if (lock.session_pid && !processIsAlive(lock.session_pid)) {
+    return false;
+  }
+  const since = Date.parse(lock.agent_id ? lock.started_at : lock.created_at);
+  const age = now - since;
+  return Number.isFinite(age) && age < (lock.agent_id ? CLAUDE_WRITER_MAX_MS : CLAUDE_START_MAX_MS);
+}
+
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "fish"]);
+
+// The pid of the Claude Code process that ran this hook: the first process
+// above this one that is not a shell, because Claude Code may start a hook
+// through a shell that ends with the hook. Null when `ps` cannot say; the lock
+// then counts by its age alone.
+export function sessionProcessPid(start = process.ppid) {
+  let pid = start;
+  for (let step = 0; step < 4 && Number.isInteger(pid) && pid > 1; step += 1) {
+    const result = spawnSync("ps", ["-o", "ppid=,comm=", "-p", String(pid)], { encoding: "utf8", timeout: PS_TIMEOUT_MS });
+    const match = result.error || result.status !== 0 ? null : /^\s*(\d+)\s+(.+)$/.exec(result.stdout.trim());
+    if (!match) {
+      return null;
+    }
+    if (!SHELLS.has(path.basename(match[2].trim()).replace(/^-/, ""))) {
+      return pid;
+    }
+    pid = Number(match[1]);
+  }
+  return null;
+}
+
+// Takes the lock of the checkout of `cwd` for a Claude writer that the route
+// hook is about to let through. Returns null on success, or the holder, as
+// acquireWriterLock() does.
+export function acquireClaudeWriterLock(cwd, { sessionId, toolUseId, agentType }, env = process.env, sessionPid = sessionProcessPid()) {
+  return takeLock(
+    cwd,
+    { job_id: `${CLAUDE_WRITER_PREFIX}${toolUseId}`, kind: "claude", session_id: sessionId, agent_type: agentType, session_pid: sessionPid },
+    env
+  );
+}
+
+// The Claude writer locks on disk, as [file, lock] pairs. There is one lock
+// file per checkout that ever had a writer, so the list is short.
+function claudeLocks(env) {
+  let names;
+  try {
+    names = fs.readdirSync(locksDir(env));
+  } catch {
+    return [];
+  }
+  return names
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => path.join(locksDir(env), name))
+    .map((file) => [file, readLock(file)])
+    .filter(([, lock]) => lock?.kind === "claude");
+}
+
+// Called on SubagentStart. The lock that the route hook took in the checkout of
+// `cwd` for this session and this agent type now belongs to the subagent, and
+// counts until it stops. Only the lock of that checkout: one session can have a
+// waiting lock in another checkout too, and confirming that one would leave the
+// writer's own lock to run out after 30 seconds (Codex review of 6607c5a).
+// Returns true when a lock was confirmed, false when none was waiting: then the
+// writer runs without a lock, for example after the 30 seconds had passed and
+// another writer took the checkout.
+export function confirmClaudeWriterLock({ cwd, sessionId, agentType, agentId }, env = process.env) {
+  if (!cwd || !sessionId || !agentType || !agentId) {
+    return false;
+  }
+  const file = lockFile(cwd, env);
+  const waiting = (lock) => lock?.kind === "claude" && lock.session_id === sessionId && lock.agent_type === agentType && !lock.agent_id;
+  if (!waiting(readLock(file))) {
+    return false;
+  }
+  const deadline = Date.now() + BREAKER_WAIT_MS;
+  while (!takeBreaker(file)) {
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    sleepSync(BREAKER_POLL_MS);
+  }
+  try {
+    // Look again under the breaker: the lock may have been broken and taken.
+    const current = readLock(file);
+    if (!waiting(current)) {
+      return false;
+    }
+    // A rename replaces the lock in one step, so the lock path is never free.
+    const fresh = `${file}.new-${process.pid}-confirm`;
+    fs.writeFileSync(fresh, JSON.stringify({ ...current, agent_id: agentId, started_at: new Date().toISOString() }), { mode: 0o600 });
+    fs.renameSync(fresh, file);
+    return true;
+  } finally {
+    dropBreaker(file);
+  }
+}
+
+// Called on SubagentStop. Gives back the lock of this subagent, if it has one.
+// Returns false when the breaker stayed busy. Unlike a Codex lock, such a lock
+// has no exit code that marks it as ended: it counts until its session ends or
+// CLAUDE_WRITER_MAX_MS has passed. The caller says so on stderr.
+export function releaseClaudeWriterLock(agentId, env = process.env) {
+  if (!agentId) {
+    return true;
+  }
+  for (const [file, lock] of claudeLocks(env)) {
+    if (lock.agent_id === agentId) {
+      return releaseLockFile(file, lock.job_id);
+    }
+  }
+  return true;
 }

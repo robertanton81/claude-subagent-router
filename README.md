@@ -46,7 +46,7 @@ Run the check at any time with `/subagent-router:setup` in a session. From a clo
 ## What leaves your machine
 
 - **To TypeSafe, only while Jev is on:** the brief (the prompt) of each `Agent` call that the hook routes, and the `Verification:` part of each answer from the plugin's own workers (at most 2,000 characters; the file list and the rest of the answer stay here). Nothing else. A brief can hold code and project rules, and a verification part can quote test output. Set `"routeOtherAgents": false` to keep the briefs of agent types other than the plugin's own workers on your machine, or set `"mode": "off"` to send none.
-- **To OpenAI, only while Codex is on:** the brief of each task that runs on Codex, plus your `~/.claude/CLAUDE.md` and the project's `CLAUDE.md` files for an implement task. A project `CLAUDE.md` that is a link to a file outside the project is not sent.
+- **To OpenAI, only while Codex is on:** the task brief and an instruction snapshot for implement tasks and custom reviews. The snapshot includes personal `CLAUDE.md` and `.claude/rules/`, plus project and parent `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md`, `.claude/rules/`, and allowed imports. The two rule switches below control personal and project sources separately. Project imports and symlinks cannot leave their source boundary; see “Instruction snapshot” below.
 - **Nothing else.** The dispatch log, the Codex jobs and the settings stay in `~/.claude/orchestrator/`, readable only by your user. The TypeSafe key is never written to a log.
 
 ## TypeSafe and Jev
@@ -135,7 +135,7 @@ Codex is off until you turn it on. While it is off:
 
 To turn Codex on for all sessions, put `"codexEnabled": true` in `~/.claude/orchestrator/config.json`. For one session, start Claude Code with `ORCH_CODEX_ENABLED=1`. The variable wins over the file, so `ORCH_CODEX_ENABLED=0` turns Codex off for one session.
 
-The hook fails open. On a timeout, an HTTP error, a missing key or any bug, it prints nothing, and the call runs as the orchestrator wrote it. There is one deliberate "no": in `enforce` mode the hook denies a writer or a reviewer of the plugin while a Codex job still changes files in the same folder. It also denies an agent type of another owner, such as `general-purpose`, when Jev says that its task changes files. Without a Jev answer such a call runs.
+The hook fails open. On a timeout, an HTTP error, a missing key or any bug, it prints nothing, and the call runs as the orchestrator wrote it. There is one deliberate "no": in `enforce` mode the hook denies a writer or a reviewer of the plugin while another writer still changes files in the same checkout. A checkout is the root of the git working tree, so a writer in `repo/src` and a writer in `repo` count as the same checkout; another worktree is a checkout of its own. The other writer is a Codex job, or a Claude writer (`implementer`, `debugger`) that runs as a subagent. A Claude writer takes the lock when the hook lets it through, so of two writers sent in one message only the first runs. It also denies an agent type of another owner, such as `general-purpose`, when Jev says that its task changes files. Without a Jev answer such a call runs.
 
 ### When one subscription has no room
 
@@ -157,8 +157,18 @@ Task text is not trusted. It can quote a web page or an issue. So it never goes 
 2. The thin Codex worker receives only `codex-request: req-<12 hex characters>`. It never sees the task text.
 3. The worker runs `node scripts/orch-codex.mjs run <request id>`. The id has a fixed shape, and the command checks it.
 4. The runner removes `CODEX_API_KEY` and `OPENAI_API_KEY` from Codex's environment and checks `codex login status`. Without a ChatGPT login the job stops, so a run is never billed at API rates.
-5. Codex reads `AGENTS.md`, not `CLAUDE.md`. So the runner adds your `~/.claude/CLAUDE.md` and the project's `CLAUDE.md` to an implement brief. A project `CLAUDE.md` that is a link to a file outside the project is skipped, so a cloned repository cannot send another file of yours to Codex.
+5. The runner adds a Claude instruction snapshot to implement briefs and custom review briefs. Codex also discovers its own `AGENTS.md` files. Scoped reviews (`--uncommitted`, `--base`, `--commit`) receive no brief and no snapshot.
 6. A request id works only for the session, the folder and the kind of job that stored it.
+
+### Instruction snapshot
+
+Personal instructions load first: `~/.claude/CLAUDE.md` and all Markdown files under `~/.claude/rules/`. Project sources follow from the filesystem root down to the task folder. Each level contributes `CLAUDE.md`, `.claude/CLAUDE.md`, recursive `.claude/rules/`, then `CLAUDE.local.md`. A rule keeps its YAML `paths` condition and its base directory. Codex is told to apply it only to matching files; the runner does not enforce that condition.
+
+Imports such as `@guides/testing.md` expand relative to the containing file. Absolute paths and `~/` paths also work. Imports in backticks or fenced code blocks stay literal. Expansion stops at four hops and detects cycles. Import paths containing whitespace are not supported. Within a checkout, project imports and symlinks must stay inside that checkout. An ancestor outside the checkout may reference files inside its own directory. Each imported file keeps the original boundary. Personal instruction imports are trusted, but conventional credential filenames such as `.env`, `.credentials.json`, `.npmrc`, private key files, and anything under `.git/` are skipped.
+
+The runner cannot inspect Claude's external-import approval state. It therefore skips project imports outside their boundary even if you approved them in Claude. It records skipped sources and truncation in `job.json` under `rules` and warns on stderr. File content is limited to 16,000 characters per file and 128,000 characters in total, with at most 256 file reads and 256 import attempts. The final snapshot is capped at 160,000 characters, including labels. Diagnostics and rule traversal also have bounds. Sources load in the order above, so a limit can omit later, more specific instructions. Check the recorded notes when a warning appears.
+
+This is a file snapshot, not a copy of the Claude session. It does not load instructions on demand from child directories, managed policy, auto memory, additional directories, or Claude settings such as `claudeMdExcludes`. Put any extra instructions needed by the task in its brief. Turning off a rule switch stops automatic discovery for that scope; an explicit import in an enabled source still follows the import rules above.
 
 ## Use
 
@@ -261,8 +271,8 @@ All settings live in one file, `~/.claude/orchestrator/config.json`. It is optio
 | :-- | :-- | :-- |
 | `codexEnabled` | `false` | Let the plugin use Codex at all. While this is off, no task reaches Codex in any mode. |
 | `codexSpendCredits` | `false` | Let a Codex job pay from bought credits once the weekly allowance is used up. |
-| `codexIncludeUserRules` | `true` | Send `~/.claude/CLAUDE.md` to Codex with an implement brief. |
-| `codexIncludeProjectRules` | `true` | Send the project's `CLAUDE.md` to Codex with an implement brief. |
+| `codexIncludeUserRules` | `true` | Send personal `CLAUDE.md`, recursive rules and allowed imports with implement and custom review briefs. |
+| `codexIncludeProjectRules` | `true` | Send project and parent instructions, local files, recursive rules and allowed imports with implement and custom review briefs. |
 
 ### Classifier and log
 
@@ -307,7 +317,7 @@ Everything is in `~/.claude/orchestrator/`. The log holds your briefs, so it sta
 | `writers.jsonl` | A small index of who changed files: the plugin's writer workers, and every Claude `Edit`, `Write`, `MultiEdit` or `NotebookEdit` call, also from the main session. The cross-review rule reads it. A `PostToolUse` hook on these tools writes one short line per call. |
 | `codex-requests/` | The stored tasks for the Codex workers. Removed after 14 days. |
 | `codex-jobs/<id>/` | The brief, the events, the error output and the result of each Codex run. Removed after 14 days. |
-| `locks/` | One lock per folder while a Codex job changes files there. It names the job and the process that started it, so it holds from the start on, before the runner has written its pid. |
+| `locks/` | One lock per checkout while a writer changes files there. For a Codex job it names the job and the process that started it, so it holds from the start on, before the runner has written its pid. For a Claude writer it names the session and, once the subagent has started, the subagent; it is given back when the subagent stops. |
 | `codex-limits.json` | The last limit numbers of Codex: percent used, reset time, credits balance. Saved after each Codex job. Numbers that may be older than the saved ones do not replace them. |
 | `notices/` | One empty file for each notice that a session has already shown, named by a hash of the session id. A file is created in one step that only one hook can win, so parallel dispatches show a notice once. Files older than 14 days are removed. A `notices.json` from a version before 2026-09-23 is no longer read and can be deleted. |
 | `codex-unavailable.json` | Written when a Codex job fails with a usage limit. Until the time in it, the routing sends no tasks to Codex, and the runner starts no Codex job unless `codexSpendCredits` is true. Delete the file to end the pause early. |
@@ -390,7 +400,8 @@ What happens when something goes wrong:
 
 ## Known limits
 
-- The writer lock covers Codex jobs only. For Claude workers, one writer at a time is a rule for the orchestrator.
+- The writer lock covers Codex jobs and the plugin's Claude writers. It does not cover edits by the main session, or agent types of other owners: such an agent waits for a writer when Jev says that its task changes files, but it takes no lock itself.
+- A Claude writer's lock that no subagent has confirmed stops counting after 30 seconds, for a dispatch that was refused or never started. A confirmed lock counts until its subagent stops, its session ends, or one hour has passed. A writer that runs longer than one hour is not protected any more. When the lock is stuck, the denial names its file; remove it only when you are sure that no writer runs.
 - An agent type of another owner waits for a Codex writer only when Jev answered and said that its task changes files. When Jev is not asked (`routeOtherAgents` is false, or the type is on the keep list) or fails, the call runs.
 - The hook redirects `codex:codex-rescue` to `subagent-router:codex-implementer`. This closes one known way around the routing, not all of them. It also changes what `/codex:rescue` does. Use `ORCH_MODE=off` to get the old behaviour.
 - Codex reports zero tokens for a review run, so the log has no token count for reviews.

@@ -9,7 +9,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { DEFAULTS, DEFAULT_MODEL, REVIEWER_SET, WRITER_FAMILY, currentAgentName, dataDir } from "./config.mjs";
+import { CODEX_JOB_KIND, DEFAULTS, DEFAULT_MODEL, REVIEWER_SET, WRITER_FAMILY, currentAgentName, dataDir } from "./config.mjs";
 import { countFindings, reportsNoWrite, verificationText } from "./findings.mjs";
 import { logFile, rotatedLogFile } from "./log.mjs";
 import { FIVE_HOURS_MS, SEVEN_DAYS_MS, windowVerdict } from "./provider-state.mjs";
@@ -220,6 +220,14 @@ export function buildReport(store, options = {}) {
   let notices = 0;
   let ruleWouldFire = 0;
   const ruleWouldFireByReason = {};
+  // Dispatches where the orchestrator named a model, and how often the hook ran
+  // another one. Jev sees only the brief, so this count shows how often the
+  // table overrules a choice made with the whole conversation in view.
+  // A move to or from a Codex worker is counted apart: the Codex workers run on
+  // Haiku only as a thin wrapper, and Codex does the task with its own model, so
+  // such a move is no model change up or down.
+  const explicitModel = { named: 0, overridden: 0, down: 0, up: 0, byChange: {}, wouldOverride: 0, toCodex: 0, fromCodex: 0, wouldMoveToCodex: 0 };
+  const isCodexWorker = (agent) => typeof agent === "string" && Boolean(CODEX_JOB_KIND[agent]);
   for (const record of dispatches) {
     count(byMode, record.mode);
     count(byAction, record.action);
@@ -243,6 +251,25 @@ export function buildReport(store, options = {}) {
     if (record.would_route && typeof record.would_route === "object") {
       ruleWouldFire += 1;
       count(ruleWouldFireByReason, record.would_route.reason ?? "unknown");
+    }
+    const namedModel = record.requested?.model;
+    if (typeof namedModel === "string") {
+      explicitModel.named += 1;
+      const ran = record.final?.model;
+      const changedAction = CHANGED_ACTIONS.has(record.action);
+      if (changedAction && isCodexWorker(record.final?.agent) && !isCodexWorker(record.requested?.agent)) {
+        explicitModel.toCodex += 1;
+      } else if (changedAction && isCodexWorker(record.requested?.agent) && !isCodexWorker(record.final?.agent)) {
+        explicitModel.fromCodex += 1;
+      } else if (record.action === "shadow" && isCodexWorker(record.route?.agent) && !isCodexWorker(record.requested?.agent)) {
+        explicitModel.wouldMoveToCodex += 1;
+      } else if (changedAction && typeof ran === "string" && ran !== namedModel) {
+        explicitModel.overridden += 1;
+        explicitModel[(MODEL_RANK[ran] ?? 0) < (MODEL_RANK[namedModel] ?? 0) ? "down" : "up"] += 1;
+        count(explicitModel.byChange, `${namedModel}->${ran}`);
+      } else if (record.action === "shadow" && typeof record.route?.model === "string" && record.route.model !== namedModel) {
+        explicitModel.wouldOverride += 1;
+      }
     }
     if (typeof record.notice === "string") {
       notices += 1;
@@ -528,6 +555,7 @@ export function buildReport(store, options = {}) {
       modelOnly,
       ruleWouldFire,
       ruleWouldFireByReason,
+      explicitModel,
       notices: { count: notices, byKind: noticesByKind },
       claudeTightAtDispatch
     },
@@ -588,6 +616,8 @@ export function renderText(report) {
   lines.push(`  Unchanged: ${dispatches.unchanged.count}: ${pairs(dispatches.unchanged.byReason)}`);
   lines.push(`  Denied by the writer lock: ${dispatches.denied}. Model-only dispatches to other agent types: ${dispatches.modelOnly}`);
   lines.push(`  A rule that only watched would have changed: ${dispatches.ruleWouldFire} of ${dispatches.total}: ${pairs(dispatches.ruleWouldFireByReason)}`);
+  const named = dispatches.explicitModel;
+  lines.push(`  Model named by the orchestrator: ${named.named} dispatches, overridden ${named.overridden} (down ${named.down}, up ${named.up}): ${pairs(named.byChange)}. In shadow mode it would have overridden ${named.wouldOverride}. Moved to Codex ${named.toCodex}, from Codex ${named.fromCodex}, would have moved to Codex ${named.wouldMoveToCodex}`);
   lines.push(`  Notices shown: ${dispatches.notices.count}: ${pairs(dispatches.notices.byKind)}`);
   lines.push(`  Claude tight at dispatch time: gate ${dispatches.claudeTightAtDispatch.gate}, pace ${dispatches.claudeTightAtDispatch.pace}, no ${dispatches.claudeTightAtDispatch.no}, unknown ${dispatches.claudeTightAtDispatch.unknown}`);
   lines.push("");

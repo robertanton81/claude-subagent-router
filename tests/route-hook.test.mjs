@@ -572,6 +572,54 @@ test("a review after a failed Codex attempt still goes to Codex, because Claude 
   });
 });
 
+test("an edit by the main session after a Codex change makes Claude the author, so the review stays with Codex", async () => {
+  await withJev({ body: jevBody({ kind: "implement", difficulty: 2.4 }) }, async ({ jev, tempDir, env }) => {
+    // Codex writes a change.
+    await runNode(HOOK, { stdin: agentCall(), env });
+    const log = "scripts/log-hook.mjs";
+    await runNode(log, { env, stdin: JSON.stringify({ hook_event_name: "PostToolUse", session_id: "session-1", tool_name: "Agent", tool_use_id: "toolu_1", tool_input: { subagent_type: "subagent-router:codex-implementer", model: "haiku" }, tool_response: { status: "async_launched", agentId: "a1" } }) });
+    await runNode(log, { env, stdin: JSON.stringify({ hook_event_name: "SubagentStop", session_id: "session-1", agent_id: "a1", agent_type: "subagent-router:codex-implementer", last_assistant_message: "CODEX_JOB 20260101-000000-abcdef exit=0\nChanged files: src/a.js" }) });
+
+    // Then the main session edits a file itself. No worker is involved.
+    const edit = await runNode("scripts/edit-hook.mjs", { env, stdin: JSON.stringify({ hook_event_name: "PostToolUse", session_id: "session-1", tool_name: "Edit", tool_input: { file_path: "src/b.js" }, tool_response: {} }) });
+    assert.deepEqual([edit.code, edit.stdout], [0, ""], "the edit hook returns nothing");
+
+    // The orchestrator asks Codex to review, as the delegate skill says. The last
+    // author is Claude, so the table must not move the review to the Claude reviewer.
+    jev.state.reply = { body: jevBody({ kind: "review", writes: 0.02 }) };
+    const review = JSON.parse(agentCall({ tool_use_id: "toolu_2" }));
+    review.tool_input.subagent_type = "subagent-router:codex-reviewer";
+    await runNode(HOOK, { stdin: JSON.stringify(review), env });
+    const record = readLog(tempDir).filter((entry) => entry.event === "dispatch").at(-1);
+    assert.deepEqual([record.final.agent, record.reason], ["subagent-router:codex-reviewer", "codex_requested"]);
+  });
+});
+
+test("the edit hook runs after every file tool, and skips other tools and other sessions' records", async () => {
+  const hooks = JSON.parse(fs.readFileSync(new URL("../hooks/hooks.json", import.meta.url), "utf8"));
+  const entry = hooks.hooks.PostToolUse.find((candidate) => candidate.hooks.some((hook) => hook.args.some((arg) => arg.endsWith("edit-hook.mjs"))));
+  assert.ok(entry, "hooks.json registers the edit hook");
+  for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit"]) {
+    assert.ok(new RegExp(`^(?:${entry.matcher})$`).test(tool), `the matcher covers ${tool}`);
+  }
+  assert.ok(!new RegExp(`^(?:${entry.matcher})$`).test("Read"));
+
+  const tempDir = makeTempDir();
+  try {
+    const env = cleanEnv(tempDir);
+    const call = (toolName, sessionId) => runNode("scripts/edit-hook.mjs", { env, stdin: JSON.stringify({ hook_event_name: "PostToolUse", session_id: sessionId, tool_name: toolName, tool_input: {} }) });
+    await call("Read", "session-1");
+    assert.ok(!fs.existsSync(path.join(tempDir, "data", "writers.jsonl")), "a tool that reads records nothing");
+    await call("Write", "session-1");
+    const { lastWriterFamily } = await import("../scripts/lib/context.mjs");
+    const dataEnv = { ORCH_DATA_DIR: env.ORCH_DATA_DIR };
+    assert.equal(lastWriterFamily("session-1", dataEnv), "claude");
+    assert.equal(lastWriterFamily("session-2", dataEnv), null, "the record belongs to its own session");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("an agent type named like an inherited object key is not redirected and has no default model", async () => {
   await withJev({ body: jevBody() }, async ({ tempDir, env }) => {
     const call = JSON.parse(agentCall());

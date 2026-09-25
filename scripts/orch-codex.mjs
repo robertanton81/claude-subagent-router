@@ -27,8 +27,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { RESULT_CONTRACT, UsageError, parseOptions, sendsBriefToCodex } from "./lib/codex-args.mjs";
-import { isUsageLimitMessage, markCodexUnavailable } from "./lib/codex-availability.mjs";
-import { readLimitsOfThread, saveCodexLimits } from "./lib/codex-limits.mjs";
+import { isUsageLimitMessage } from "./lib/codex-availability.mjs";
+import { readEvents } from "./lib/codex-events.mjs";
+import { readLimitsOfThread } from "./lib/codex-limits.mjs";
 import { REQUEST_ID_PATTERN, claimRequest, recordJobOfRequest, restoreRequest } from "./lib/codex-request.mjs";
 import { dataDir, loadConfig } from "./lib/config.mjs";
 import { ensurePrivateDir } from "./lib/log.mjs";
@@ -260,36 +261,6 @@ async function waitForJob(dir, waitSeconds) {
   }
 }
 
-// Reads events.jsonl from the end. With --json, Codex reports its own errors as
-// events on stdout, for example a used-up plan, and not on stderr.
-function readEvents(dir) {
-  const found = { usage: null, error: null, threadId: null };
-  let lines = [];
-  try {
-    lines = fs.readFileSync(path.join(dir, "events.jsonl"), "utf8").split("\n");
-  } catch {
-    return found;
-  }
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    let event;
-    try {
-      event = JSON.parse(lines[index]);
-    } catch {
-      continue;
-    }
-    if (event.type === "thread.started" && typeof event.thread_id === "string") {
-      found.threadId = event.thread_id;
-    }
-    if (!found.usage && event.type === "turn.completed" && event.usage) {
-      found.usage = event.usage;
-    }
-    if (!found.error && (event.type === "turn.failed" || event.type === "error")) {
-      found.error = event.error?.message ?? event.message ?? null;
-    }
-  }
-  return found;
-}
-
 function tail(file, lineCount) {
   try {
     return fs.readFileSync(file, "utf8").trimEnd().split("\n").slice(-lineCount).join("\n");
@@ -327,12 +298,9 @@ function printResult(dir) {
   const job = readJob(dir);
   const events = readEvents(dir);
 
-  // Codex writes its limit numbers only into its own session file. Save them, so
-  // the routing hook knows how much room the ChatGPT plan has left.
+  // Codex writes its limit numbers only into its own session file. The runner
+  // saved them when Codex ended (see codex-events.mjs); here they are only shown.
   const limits = readLimitsOfThread(events.threadId);
-  if (limits) {
-    saveCodexLimits(limits);
-  }
   const used = limits ? ` codex_used=${Math.round(limits.usedPercent)}%` : "";
 
   if (code === 0 && result) {
@@ -347,8 +315,8 @@ function printResult(dir) {
   }
 
   const reasons = [];
+  // The runner has already started the routing pause for this case.
   if (isUsageLimitMessage(events.error)) {
-    markCodexUnavailable(events.error);
     reasons.push("Codex has no capacity left. Tell the user in one sentence, and send this task to a Claude worker now: subagent-router:implementer, or subagent-router:reviewer for a review. The routing hook does the same for later Codex tasks until the plan resets.");
   }
   if (events.error) {

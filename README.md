@@ -40,7 +40,7 @@ Run the check at any time with `/subagent-router:setup` in a session. From a clo
 0. **Settings.** Run `/subagent-router:configure` in a session and answer its questions, or leave everything at its default and come back to the [Configuration](#configuration) section later. Codex stays off until you turn it on.
 1. **Codex CLI (only to use Codex).** Install it, run `codex login` with your ChatGPT account, and turn Codex on with `/subagent-router:configure` or `node scripts/orch-config.mjs set codexEnabled=true`.
 2. **Jev and its key (for the routing).** Follow the four steps in [TypeSafe and Jev](#typesafe-and-jev): create a key, store it in the plugin option, set `jevEnabled` to true, and check it.
-3. **Status line log (optional).** The limit rule and the measurement need the two rate limit percentages, their reset times and the session id. Only the status line receives them. Paste the lines from [scripts/statusline-snippet.sh](scripts/statusline-snippet.sh) into your status line script, after the place where it reads `rate_limits`. The block reads the variables `RATE_5H`, `RATE_7D`, `RATE_5H_RESET`, `RATE_7D_RESET` and `SESSION_ID`; set the ones your script has, and the others are written as null. Without this file the limit rule is off, and everything else works. `node scripts/setup-check.mjs` says when the file is there but comes from an older snippet without the reset times.
+3. **Status line log (optional).** The limit rule and the measurement need the two rate limit percentages, their reset times and the session id. Only the status line receives them. Paste the lines from [scripts/statusline-snippet.sh](scripts/statusline-snippet.sh) into your status line script, after the place where it reads `rate_limits`. The block reads the variables `RATE_5H`, `RATE_7D`, `RATE_5H_RESET`, `RATE_7D_RESET` and `SESSION_ID`; set the ones your script has, and the others are written as null. Without this file the limit rule is off, and everything else works. When the file exists but its sample is too old (`limitsMaxAgeMs`, 10 minutes by default) or cannot be read, the session start says once per session that the limit rule is off. This happens in the Claude Code desktop app, which runs no status line. `node scripts/setup-check.mjs` says when the file is there but comes from an older snippet without the reset times.
 4. **Permission for the Codex workers (optional).** The Codex workers run one Bash command. To avoid a prompt each time, allow it in your settings: `Bash(node */scripts/orch-codex.mjs *)`.
 
 ## What leaves your machine
@@ -96,8 +96,8 @@ Run the check at any time with `/subagent-router:setup` in a session. From a clo
 | `subagent-router:implementer` | Sonnet | `high` | Writes and changes code inside a defined scope. |
 | `subagent-router:debugger` | Opus | `medium` | Finds the cause of a failure. |
 | `subagent-router:reviewer` | Sonnet | `high` | Reviews changes. Changes no files. |
-| `subagent-router:codex-implementer` | Codex CLI | Codex settings | Implements a task on the ChatGPT plan. Needs a complete brief. |
-| `subagent-router:codex-reviewer` | Codex CLI | Codex settings | Reviews the uncommitted changes, a branch or a commit. |
+| `subagent-router:codex-implementer` | Codex CLI | Codex settings | Implements a task on the ChatGPT plan. Needs a complete brief. A task the orchestrator sends to it stays there while Codex can take it. |
+| `subagent-router:codex-reviewer` | Codex CLI | Codex settings | Reviews the uncommitted changes, a branch or a commit. A review the orchestrator sends to it stays there while Codex can take it, unless Codex wrote the change. |
 
 Effort is how much the model thinks before it answers. Each Claude worker sets it in its agent file, at the default of its own model (Sonnet 5 `high`, Opus 5.5 `medium`), so the session's effort does not carry over to the workers. Haiku 4.5 takes no effort. The level stays when the hook changes the model: an implementer moved to Opus runs at `high`. The variable `CLAUDE_CODE_EFFORT_LEVEL` overrides it. The Codex workers use the model and effort of `~/.codex/config.toml`, unless the brief has a `codex-model:` or `codex-effort:` line.
 
@@ -304,7 +304,7 @@ Everything is in `~/.claude/orchestrator/`. The log holds your briefs, so it sta
 | File | Content |
 | :-- | :-- |
 | `dispatch-log.jsonl` | One line per event: `session`, `dispatch`, `launched`, `start`, `stop`, `hook_error`. Every line carries `cwd`, the project folder of the session, so one log serves every project. At 25 MB the file is renamed to `dispatch-log.1.jsonl` and replaces the older one, so the log takes at most two files of that size. `ORCH_LOG_MAX_BYTES` changes the limit, in bytes, 1024 or more. |
-| `writers.jsonl` | A small index of the workers that changed files. The cross-review rule reads it. |
+| `writers.jsonl` | A small index of who changed files: the plugin's writer workers, and every Claude `Edit`, `Write`, `MultiEdit` or `NotebookEdit` call, also from the main session. The cross-review rule reads it. A `PostToolUse` hook on these tools writes one short line per call. |
 | `codex-requests/` | The stored tasks for the Codex workers. Removed after 14 days. |
 | `codex-jobs/<id>/` | The brief, the events, the error output and the result of each Codex run. Removed after 14 days. |
 | `locks/` | One lock per folder while a Codex job changes files there. It names the job and the process that started it, so it holds from the start on, before the runner has written its pid. |
@@ -324,6 +324,7 @@ Inside a session the same report is `/subagent-router:report`. It reads the whol
 What it prints, and what each number is for:
 
 - Dispatches per project, mode and action, and the share that the hook changed, by reason. This is the first number to read: when it is near zero, the plugin costs TypeSafe latency and money and saves nothing.
+- How often the orchestrator named a model in the call, and how often the hook ran another one, down or up, by pair (`opus->sonnet`), plus how often shadow mode would have done so. A move to or from a Codex worker is counted apart, because Haiku only runs the Codex wrapper and Codex does the task with its own model. Jev sees only the brief, and the orchestrator sees the whole conversation, so a high count downwards is the question to ask before trusting the table over the orchestrator.
 - Jev: how often it answered, its latency, the kinds, the share of answers at the kind gate and at the difficulty gate, and how often it agreed with the request, differed, or abstained.
 - Labels for a route that was too small, which the log gives for free: a retry of the same brief in the same session on a bigger model; a worker result whose verification text names a failure (a text match, because workers write the verification in their own words); a Codex job that failed. The other direction, a route that was bigger than needed, cannot come from the log; it needs the offline task set of the evaluation step.
 - Durations per worker from start to stop, and review findings by the family of the author, with the same author rule as the cross-review: a worker that failed or reported "Changed files: none" is not an author.

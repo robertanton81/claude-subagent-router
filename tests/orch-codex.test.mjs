@@ -591,6 +591,51 @@ test("the limit numbers of Codex are saved after a job, and spent credits are re
   });
 });
 
+// Waits until the runner has written the exit code of a job. It watches the
+// file, so the test does not depend on how fast the machine is.
+async function exitCodeOf(tempDir, jobId) {
+  const file = path.join(tempDir, "data", "codex-jobs", jobId, "exit-code");
+  for (let waited = 0; waited < 15000; waited += 50) {
+    if (fs.existsSync(file)) {
+      return fs.readFileSync(file, "utf8").trim();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`the job ${jobId} wrote no exit code`);
+}
+
+test("a job that nobody waits for still saves the Codex numbers and the usage-limit pause", async () => {
+  await withSetup({}, async ({ tempDir, env }) => {
+    const withHome = { ...env, CODEX_HOME: path.join(tempDir, "codex-home") };
+    // The stand-in ends after a short delay, so the start returns STILL_RUNNING
+    // and never prints the result. Before, only the printing saved the numbers.
+    const delayed = (script) => script.replace('if (args[0] === "login")', "const delayUntil = Date.now() + 400; while (Date.now() < delayUntil) {}\nif (args[0] === \"login\")");
+    fs.writeFileSync(env.ORCH_CODEX_BIN, delayed(fakeCodexWithLimits(100, "12.0")), { mode: 0o755 });
+    const started = await runNode(CLI, { args: ["review", "--wait", "0"], stdin: "", env: withHome, cwd: tempDir });
+    assert.match(started.stdout, /^STILL_RUNNING /);
+    assert.equal(await exitCodeOf(tempDir, jobIdOf(started.stdout)), "0");
+    assert.equal(readCodexLimits({ ORCH_DATA_DIR: env.ORCH_DATA_DIR })?.usedPercent, 100, "the runner saved the numbers");
+
+    const message = "You've hit your usage limit. Try again later.";
+    fs.writeFileSync(
+      env.ORCH_CODEX_BIN,
+      `#!/usr/bin/env node
+if (process.argv[2] === "login") { process.stderr.write("Logged in using ChatGPT\\n"); process.exit(0); }
+setTimeout(() => {
+  process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message: ${JSON.stringify(message)} } }) + "\\n");
+  process.exit(1);
+}, 400);
+`,
+      { mode: 0o755 }
+    );
+    fs.writeFileSync(path.join(tempDir, "data", "config.json"), JSON.stringify({ codexSpendCredits: true }));
+    const failing = await runNode(CLI, { args: ["review", "--wait", "0"], stdin: "", env: withHome, cwd: tempDir });
+    assert.match(failing.stdout, /^STILL_RUNNING /);
+    assert.equal(await exitCodeOf(tempDir, jobIdOf(failing.stdout)), "1");
+    assert.ok(codexUnavailableUntil({ ORCH_DATA_DIR: env.ORCH_DATA_DIR }) > Date.now(), "the runner recorded the pause");
+  });
+});
+
 test("a used-up weekly window stops the next job, also when the 5-hour window has room", async () => {
   await withSetup({}, async ({ tempDir, env }) => {
     const withHome = { ...env, CODEX_HOME: path.join(tempDir, "codex-home") };

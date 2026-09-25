@@ -8,7 +8,7 @@ import path from "node:path";
 
 import { dataDir, loadConfig } from "./lib/config.mjs";
 import { appendLog } from "./lib/log.mjs";
-import { claudeCapNotice, claudeNotice, claudeState, codexNotice, codexState } from "./lib/provider-state.mjs";
+import { claudeCapNotice, claudeNotice, claudeState, codexNotice, codexState, firstNotice, limitsBlindNotice } from "./lib/provider-state.mjs";
 
 // Nobody has set anything yet, so every setting is at its default and Codex is
 // off. Saying so once, with the skill that changes it, is friendlier than
@@ -139,6 +139,12 @@ function main() {
     if (jevOn && claude.tight) {
       // The hook moves work to Codex only while Codex can take it. Otherwise it lowers the biggest model.
       notices.push(codex.available ? claudeNotice(claude) : claudeCapNotice(claude));
+    }
+    // The hook starts again on a resume or a compaction of the same session, so
+    // this notice is shown once per session, like the notices of the route hook.
+    const blind = jevOn ? limitsBlindNotice(claude, config) : null;
+    if (blind && firstNotice(input?.session_id ?? null, "limits_blind")) {
+      notices.push(blind);
     }
   }
   if (notices.length === 0) {

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1
+
+- The report counts the dispatches where the orchestrator named a model, and how often the hook ran another one, down or up, by pair. A move to or from a Codex worker is counted apart, because Haiku only runs the Codex wrapper.
+- A task the orchestrator sends to a Codex worker now stays on Codex while Codex can take it (reason `codex_requested`). Before, the table kept only hard tasks on Codex, so an explicit call for a medium task moved to the Claude implementer, and the ChatGPT allowance went unused. The table still moves it when Codex is off, paused, used up, or near its limit while Claude is not, and a review still goes to the Claude reviewer when Codex wrote the change.
+- While Jev is on, the session start says once per session when the limit rule cannot act, because the Claude usage sample from the status line is too old or cannot be read. The desktop app runs no status line, so there the rule stopped acting and nobody was told.
+- The job runner now saves the Codex limit numbers and starts the usage-limit pause when Codex ends. Before, only the command that printed the result did this. A job that ran past the worker's last wait was never printed, so a used-up plan went unnoticed, and the next job could be paid from credits.
+- The cross-review rule now sees edits by the main session. A new `PostToolUse` hook on the Claude file tools records each such edit. Before, only the plugin's writer workers counted: after a Codex change, an edit by the main session left Codex as the author, and a review that the orchestrator sent to Codex was moved to the Claude reviewer, so Claude reviewed its own change.
+
 ## 0.3.0
 
 - **New name.** The plugin is now `subagent-router`, and the repository and marketplace are `claude-subagent-router`. The old names did not say that this is a Claude Code plugin, or what it does. Agents and skills now start with `subagent-router:`, for example `/subagent-router:setup` and `subagent-router:reviewer`.

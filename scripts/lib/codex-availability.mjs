@@ -12,8 +12,9 @@
 // time cannot be read, the pause is one hour.
 //
 // The second signal is the limit numbers that Codex writes into its own session
-// file. When orch-codex.mjs prints the result of a finished job, it saves these
-// numbers, unless they may be out of date (see codex-limits.mjs).
+// file. When a Codex job ends, its runner saves these numbers, unless they may
+// be out of date (see codex-limits.mjs), and starts the pause for the first
+// signal (see codex-events.mjs).
 
 import fs from "node:fs";
 import path from "node:path";

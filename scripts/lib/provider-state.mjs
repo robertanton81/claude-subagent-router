@@ -156,6 +156,28 @@ export function claudeCapNotice(claude) {
   return `${claudeUsageText(claude)} Codex cannot take work, so tasks that would run on Opus now run on Sonnet, to save the Claude limit.`;
 }
 
+// The notice for a limit rule that cannot see Claude usage, or null when it can.
+// Only the status line receives the usage numbers, and the Claude Code desktop
+// app runs no status line. Before this notice, the rule then stopped acting and
+// nobody was told. A missing file gets no notice: the user never set the status
+// line up, and the README says that the rule is then off.
+export function limitsBlindNotice(claude, config) {
+  const limits = claude.limits ?? {};
+  const effect = "Until a fresh sample arrives, the hook does not lower Opus or move work to Codex when Claude usage is high.";
+  if (limits.state === "old") {
+    const minutes = Math.round(limits.ageMs / 60000);
+    const maxMinutes = Math.round(config.limitsMaxAgeMs / 60000);
+    return (
+      `The limit rule is off: the last Claude usage sample is ${minutes} minutes old, and a sample counts for ${maxMinutes} minutes. ` +
+      `The status line writes the sample; the Claude Code desktop app runs no status line, a terminal session does. ${effect}`
+    );
+  }
+  if (limits.state === "damaged") {
+    return `The limit rule is off: the Claude usage sample cannot be read (${limits.detail}). ${effect}`;
+  }
+  return null;
+}
+
 // Marks of notices that were shown are kept this long. A session that resumes
 // after that sees its notice once more.
 const NOTICE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;

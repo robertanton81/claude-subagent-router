@@ -67,6 +67,7 @@ Codex is opt-in. While it is off, the session start text says so, and every revi
 
 - Review once per logical piece of work, not after every edit.
 - The reviewer comes from the other model family than the author. Changes from Claude workers or from the main session go to `subagent-router:codex-reviewer`. Changes from `subagent-router:codex-implementer` go to `subagent-router:reviewer`.
+- A call to a Codex worker stays on Codex while Codex can take it. The hook moves it to Claude only when Codex is off, paused, used up, or near its limit while Claude is not, and moves a review to the Claude reviewer when Codex wrote the change.
 - A finding can be wrong. Check it against the code before you act on it.
 - A clean review is not proof that the change is correct.
 

@@ -1,6 +1,6 @@
 {
   "name": "claude-subagent-router",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Claude Code plugin that routes subagent work across Claude models and the Codex CLI.",
   "type": "module",

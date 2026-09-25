@@ -153,6 +153,35 @@ test("a review brief that is not self-contained stays with the Claude reviewer",
   assert.deepEqual([route.agent, route.reason], [WORKERS.reviewer, "review_needs_context"]);
 });
 
+test("a task the orchestrator sent to a Codex worker stays on Codex while Codex can take it", () => {
+  const toCodex = { ...noContext, codexAvailable: true, requestedAgent: WORKERS.codexImplementer };
+  const kept = { agent: WORKERS.codexImplementer, model: "haiku", reason: "codex_requested" };
+  // A medium task: without the request, the table sends it to the Claude implementer.
+  assert.deepEqual(decideRoute(answers(), toCodex, config), kept);
+  assert.deepEqual(decideRoute(answers({ kind: "mechanical_edit", difficulty: 0.2 }), toCodex, config), kept);
+  assert.deepEqual(decideRoute(answers({ kind: "debug" }), toCodex, config), kept);
+  // The orchestrator wrote the brief for Codex, so Jev's doubt about it does not undo the choice.
+  assert.deepEqual(decideRoute(answers({ selfContained: 0.2 }), toCodex, config), kept);
+
+  // Codex cannot take it: off, paused or used up.
+  assert.equal(decideRoute(answers(), { ...toCodex, codexAvailable: false }, config).agent, WORKERS.implementer);
+  // Codex is near its own limit and Claude is not: the table spares Codex, as for any task.
+  assert.equal(decideRoute(answers(), { ...toCodex, codexTight: true }, config).agent, WORKERS.implementer);
+  // A diagnosis that changes no files never gets the Codex sandbox that can write.
+  assert.equal(decideRoute(answers({ kind: "debug", writesFiles: 0.1 }), toCodex, config).agent, WORKERS.debugger);
+  // The answers disagree with the request: the table decides as before.
+  assert.equal(decideRoute(answers({ kind: "search", writesFiles: 0.05 }), toCodex, config).agent, WORKERS.searcher);
+});
+
+test("a review the orchestrator sent to the Codex reviewer stays there, unless Codex wrote the change", () => {
+  const toCodex = { ...noContext, codexAvailable: true, requestedAgent: WORKERS.codexReviewer };
+  const review = answers({ kind: "review", writesFiles: 0.05, selfContained: 0.2 });
+  // A scoped review needs no self-contained brief, so a low answer does not move it.
+  assert.deepEqual(decideRoute(review, toCodex, config), { agent: WORKERS.codexReviewer, model: "haiku", reason: "codex_requested" });
+  assert.deepEqual(decideRoute(review, { ...toCodex, lastWriterFamily: "codex" }, config), { agent: WORKERS.reviewer, model: "sonnet", reason: "cross_review" });
+  assert.equal(decideRoute(review, { ...toCodex, codexAvailable: false }, config).agent, WORKERS.reviewer);
+});
+
 test("design, other and unknown kinds get no rewrite", () => {
   for (const kind of ["design", "other", "something_new"]) {
     const route = decideRoute(answers({ kind }), noContext, config);

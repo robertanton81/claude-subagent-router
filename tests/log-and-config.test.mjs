@@ -608,6 +608,39 @@ test("at a high Claude usage the session start names the switch that the hook wi
   }
 });
 
+test("the session start says once when the limit rule cannot act, because the usage sample is old", async () => {
+  const tempDir = makeTempDir();
+  try {
+    const limitsFile = path.join(tempDir, "limits-latest.json");
+    // A sample from 90 minutes ago, as the desktop app leaves it: it runs no status line.
+    fs.writeFileSync(limitsFile, JSON.stringify({ ts: Math.floor(Date.now() / 1000) - 90 * 60, five_hour: 95, seven_day: 40 }));
+    const env = cleanEnv(tempDir, { ORCH_LIMITS_FILE: limitsFile });
+    const start = (source) => runNode("scripts/session-start.mjs", { env, stdin: JSON.stringify({ session_id: "s1", cwd: tempDir, source }) });
+
+    const first = JSON.parse((await start("startup")).stdout);
+    assert.match(first.systemMessage, /The limit rule is off: the last Claude usage sample is 90 minutes old/);
+    assert.match(first.hookSpecificOutput.additionalContext, /The limit rule is off/);
+    assert.ok(!first.systemMessage.includes("now run on"), "an old sample must not promise a switch");
+
+    // A compaction of the same session starts the hook again. The notice is not repeated.
+    const again = await start("compact");
+    assert.ok(!again.stdout.includes("The limit rule is off"), again.stdout);
+
+    // Without a sample file the user never set the status line up. The README
+    // says the rule is then off, so no notice at each start.
+    fs.rmSync(limitsFile);
+    const missing = await runNode("scripts/session-start.mjs", { env, stdin: JSON.stringify({ session_id: "s2", cwd: tempDir, source: "startup" }) });
+    assert.ok(!missing.stdout.includes("The limit rule is off"), missing.stdout);
+
+    // With Jev off the rule does nothing anyway, so there is nothing to warn about.
+    fs.writeFileSync(limitsFile, JSON.stringify({ ts: Math.floor(Date.now() / 1000) - 90 * 60, five_hour: 95 }));
+    const jevOff = await runNode("scripts/session-start.mjs", { env: { ...env, ORCH_JEV_ENABLED: "" }, stdin: JSON.stringify({ session_id: "s3", cwd: tempDir, source: "startup" }) });
+    assert.ok(!jevOff.stdout.includes("The limit rule is off"), jevOff.stdout);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("the dispatch log and its folder are private, also when older ones were wider", () => {
   const tempDir = makeTempDir();
   try {

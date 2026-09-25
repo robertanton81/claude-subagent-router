@@ -250,6 +250,34 @@ test("the report counts a rule that only watched, and leaves the routes it did n
   assert.match(renderText(report), /A rule that only watched would have changed: 2 of 3: needs_every_match 2/);
 });
 
+test("the report counts how often the hook overrode a model that the orchestrator named", () => {
+  const base = { event: "dispatch", session_id: "s", cwd: "/work/p", mode: "enforce", ts: "2026-09-22T10:00:00.000Z" };
+  const report = buildReport({
+    dataDir: "/tmp/none",
+    log: [
+      // Named opus, ran on sonnet: an override downwards.
+      { ...base, tool_use_id: "a", action: "rewrite", reason: "implement", requested: { agent: "subagent-router:implementer", model: "opus" }, final: { agent: "subagent-router:implementer", model: "sonnet" } },
+      { ...base, tool_use_id: "b", action: "rewrite", reason: "search", model_only: true, requested: { agent: "Explore", model: "opus" }, final: { agent: "Explore", model: "haiku" } },
+      // Named haiku, ran on opus: an override upwards.
+      { ...base, tool_use_id: "c", action: "rewrite", reason: "debug", requested: { agent: "subagent-router:debugger", model: "haiku" }, final: { agent: "subagent-router:debugger", model: "opus" } },
+      // Named sonnet and kept: not an override.
+      { ...base, tool_use_id: "d", action: "agree", reason: "implement", requested: { agent: "subagent-router:implementer", model: "sonnet" }, final: { agent: "subagent-router:implementer", model: "sonnet" } },
+      // A shadow record changed nothing. It counts as "would have overridden".
+      { ...base, tool_use_id: "e", mode: "shadow", action: "shadow", reason: "implement", requested: { agent: "subagent-router:implementer", model: "opus" }, final: { agent: "subagent-router:implementer", model: "opus" }, route: { agent: "subagent-router:implementer", model: "sonnet", reason: "implement" } },
+      // A move to or from Codex is not a model change: Haiku only runs the Codex wrapper.
+      { ...base, tool_use_id: "g", action: "rewrite", reason: "hard_and_self_contained", requested: { agent: "subagent-router:implementer", model: "opus" }, final: { agent: "subagent-router:codex-implementer", model: "haiku" } },
+      { ...base, tool_use_id: "h", action: "fallback", reason: "codex_plan_used_up", requested: { agent: "subagent-router:codex-reviewer", model: "haiku" }, final: { agent: "subagent-router:reviewer", model: "sonnet" } },
+      { ...base, tool_use_id: "i", mode: "shadow", action: "shadow", reason: "limit_rule", requested: { agent: "subagent-router:implementer", model: "opus" }, final: { agent: "subagent-router:implementer", model: "opus" }, route: { agent: "subagent-router:codex-implementer", model: "haiku", reason: "limit_rule" } },
+      // No model named: not part of this count.
+      { ...base, tool_use_id: "f", action: "rewrite", reason: "implement", requested: { agent: "general-purpose", model: null }, final: { agent: "general-purpose", model: "sonnet" } }
+    ],
+    limits: [],
+    files: []
+  });
+  assert.deepEqual(report.dispatches.explicitModel, { named: 8, overridden: 3, down: 2, up: 1, byChange: { "opus->sonnet": 1, "opus->haiku": 1, "haiku->opus": 1 }, wouldOverride: 1, toCodex: 1, fromCodex: 1, wouldMoveToCodex: 1 });
+  assert.match(renderText(report), /Model named by the orchestrator: 8 dispatches, overridden 3 \(down 2, up 1\): opus->sonnet 1, opus->haiku 1, haiku->opus 1\. In shadow mode it would have overridden 1\. Moved to Codex 1, from Codex 1, would have moved to Codex 1/);
+});
+
 test("records from before the rename count under the new worker names", () => {
   // Up to 0.2.3 the plugin was "orchestrator". An old Claude writer is reviewed by
   // a new Codex reviewer, and a new Codex writer by an old Claude reviewer.

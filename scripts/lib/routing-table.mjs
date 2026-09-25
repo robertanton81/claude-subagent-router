@@ -115,12 +115,23 @@ function toClaude(agent, model, reason, facts) {
   return to(agent, picked.model, picked.reason);
 }
 
+// The orchestrator sent the task to a Codex worker, and Codex can take it. The
+// orchestrator knows the whole conversation, while Jev sees only the brief, so
+// the choice stays. Before, only a hard task or a tight Claude kept a task on
+// Codex: an explicit call for a medium task moved to the Claude implementer, and
+// the ChatGPT allowance went unused. The table still moves the task away when
+// Codex is off, paused or used up, or near its own limit while Claude is not.
+function codexWasRequested(worker, context, facts) {
+  return context.requestedAgent === worker && context.codexAvailable !== false && !facts.spareCodex;
+}
+
 export function decideRoute(answers, context, config) {
   if (answers.kindConfidence < config.kindGate) {
     return keep("low_confidence");
   }
   const facts = readFacts(answers, context, config);
   const { hard, trivial, writes, codexCanDoIt, preferCodex, spareCodex } = facts;
+  const keepCodexImplementer = codexWasRequested(WORKERS.codexImplementer, context, facts);
 
   switch (answers.kind) {
     case "search":
@@ -142,6 +153,9 @@ export function decideRoute(answers, context, config) {
       if (!writes) {
         return keep("answers_disagree");
       }
+      if (keepCodexImplementer) {
+        return to(WORKERS.codexImplementer, "haiku", "codex_requested");
+      }
       if (preferCodex && codexCanDoIt && !trivial) {
         return to(WORKERS.codexImplementer, "haiku", "limit_rule");
       }
@@ -150,6 +164,9 @@ export function decideRoute(answers, context, config) {
     case "implement":
       if (!writes) {
         return keep("answers_disagree");
+      }
+      if (keepCodexImplementer) {
+        return to(WORKERS.codexImplementer, "haiku", "codex_requested");
       }
       if (codexCanDoIt && hard && !spareCodex) {
         return to(WORKERS.codexImplementer, "haiku", "hard_and_self_contained");
@@ -165,6 +182,9 @@ export function decideRoute(answers, context, config) {
     case "debug":
       // The Codex implementer runs with a sandbox that can write. A diagnosis that
       // must change no files stays with the debugger, also when Claude is tight.
+      if (writes && keepCodexImplementer) {
+        return to(WORKERS.codexImplementer, "haiku", "codex_requested");
+      }
       if (preferCodex && codexCanDoIt && writes) {
         return to(WORKERS.codexImplementer, "haiku", "limit_rule");
       }
@@ -178,6 +198,12 @@ export function decideRoute(answers, context, config) {
       // The orchestrator itself is Claude, so "no known author" counts as Claude.
       if (context.lastWriterFamily === "codex") {
         return to(WORKERS.reviewer, "sonnet", "cross_review");
+      }
+      // A scoped review needs no self-contained brief, so the gate on the brief
+      // does not undo an explicit call. Codex being near its limit does not
+      // either: a review is short, and the other family is the point of it.
+      if (context.requestedAgent === WORKERS.codexReviewer && context.codexAvailable !== false) {
+        return to(WORKERS.codexReviewer, "haiku", "codex_requested");
       }
       if (!codexCanDoIt) {
         return to(WORKERS.reviewer, "sonnet", context.codexAvailable === false ? "codex_unavailable" : "review_needs_context");

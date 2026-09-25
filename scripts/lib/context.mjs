@@ -64,6 +64,12 @@ export function readLimits(config, env = process.env, now = Date.now()) {
 //   {"s": session, "t": tool_use_id, "f": "claude" | "codex"}   a writer was dispatched
 //   {"s": session, "t": tool_use_id, "a": agent_id}             that dispatch became this agent
 //   {"s": session, "a": agent_id, "nw": true | false}           the agent stopped; nw = it wrote nothing
+//   {"s": session, "f": "claude", "e": true}                    a Claude file tool changed a file
+//
+// The last kind comes from the edit hook. Without it, only the plugin's workers
+// counted as authors: after a Codex change, an edit by the main session left
+// Codex as the author, and the table moved the review to the Claude reviewer,
+// so Claude reviewed its own change.
 
 const WRITERS_FILE = "writers.jsonl";
 const WRITERS_MAX_BYTES = 4 * 1024 * 1024;
@@ -89,6 +95,14 @@ export function recordWriterDispatch(sessionId, toolUseId, agent, env = process.
 export function recordWriterLaunch(sessionId, toolUseId, agent, agentId, env = process.env) {
   if (WRITER_FAMILY[agent] && sessionId && toolUseId && agentId) {
     appendWriterRecord({ s: sessionId, t: toolUseId, a: agentId }, env);
+  }
+}
+
+// A Claude file tool (Edit, Write, ...) changed a file, in the main session or in
+// any subagent. Codex never uses these tools, so the family is always Claude.
+export function recordClaudeEdit(sessionId, env = process.env) {
+  if (sessionId) {
+    appendWriterRecord({ s: sessionId, f: "claude", e: true }, env);
   }
 }
 

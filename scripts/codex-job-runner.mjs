@@ -17,6 +17,7 @@ import path from "node:path";
 
 import { buildCodexArgs, sendsBriefToCodex } from "./lib/codex-args.mjs";
 import { codexUnavailableUntil } from "./lib/codex-availability.mjs";
+import { recordPlanState } from "./lib/codex-events.mjs";
 import { codexPlanIsUsedUp, readCodexLimits } from "./lib/codex-limits.mjs";
 import { loadConfig } from "./lib/config.mjs";
 import { makeFilePrivate } from "./lib/log.mjs";
@@ -255,6 +256,13 @@ try {
     child.on("exit", async (code, signal) => {
       const leftovers = await stopLeftovers();
       const join = (note) => [note, leftovers].filter(Boolean).join("; ") || null;
+      // Before the exit code: a waiter that sees the job as done, and the next
+      // start, must already see a used-up plan or a pause.
+      try {
+        recordPlanState(jobDir, stopReason ? stopReason.code : code ?? 1);
+      } catch (error) {
+        process.stderr.write(`the state of the Codex plan could not be recorded: ${error.message}\n`);
+      }
       if (stopReason) {
         finish(stopReason.code, join(stopReason.note));
       } else {

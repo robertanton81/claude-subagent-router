@@ -134,10 +134,10 @@ function bindingWindow(limits, now) {
 // or more belongs to a later window.
 const SAME_WINDOW_MS = 3600 * 1000;
 
-// Decides whether the numbers of a printed job may replace the saved numbers.
-// Jobs are not always printed in the order in which they ended: two jobs run
-// side by side, or a second `wait` prints an old job again. A percentage that
-// is too low lets the next job start, and Codex may then pay from credits.
+// Decides whether the numbers of a finished job may replace the saved numbers.
+// Two jobs can run side by side, and the one that read its numbers first can
+// end last. A percentage that is too low lets the next job start, and Codex may
+// then pay from credits.
 function mayReplaceSaved(limits, saved, now) {
   // readCodexLimits() would read numbers without a percentage as "unknown".
   if (!Number.isFinite(limits?.usedPercent)) {

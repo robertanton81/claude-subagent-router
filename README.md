@@ -1,198 +1,314 @@
 # Claude Subagent Router
 
-A Claude Code plugin that picks the model for each subagent task. It sends a task to the smallest Claude model that can do it, and it can move work to the Codex CLI.
+A Claude Code plugin that picks the model for each subagent task. A subagent is a helper that your main Claude Code session starts for one task. The main session gives it a brief: the prompt that describes the task. The plugin sends each task to the smallest Claude model that can do it. It can also move work to the Codex CLI, OpenAI's coding agent for the terminal.
+
+To pick a model, the plugin asks Jev about each brief. Jev is a paid classifier from TypeSafe: a model that writes no text and answers fixed questions with probabilities. Jev is off until you turn it on, and while it is off, the plugin picks no model. See [What leaves your machine](#what-leaves-your-machine).
+
+**Contents:** [Why](#why) · [Requirements](#requirements) · [Install](#install) · [Setup](#setup) · [What leaves your machine](#what-leaves-your-machine) · [How it works](#how-it-works) · [TypeSafe and Jev](#typesafe-and-jev) · [Codex](#codex) · [Use](#use) · [Why was a call not rerouted?](#why-was-a-call-not-rerouted) · [Configuration](#configuration) · [Known limits](#known-limits) · [More documentation](#more-documentation) · [Develop the plugin](#develop-the-plugin)
 
 ## Why
 
-A Claude Code session hands work to subagents: searches, edits, reviews, debugging. Without routing, a subagent often runs on the same large model as the main session, even for a simple file search. That uses up the 5-hour and weekly limits of a Claude subscription faster than needed.
+Your Claude plan counts usage in two windows, periods that start again when they reset: a 5-hour window and a weekly window. Without routing, a subagent often runs on the same large model as the main session, even for a simple file search. That uses up both windows faster than needed.
 
-The plugin reads each task before it starts and picks a model that fits it: Haiku for a search, Sonnet for most edits and reviews, Opus for hard work. If you turn Codex on, the plugin moves tasks to Codex when your Claude usage gets close to its limit, so your ChatGPT subscription takes part of the work. Reviews then cross the two model families: Codex reviews what Claude wrote, and Claude reviews what Codex wrote.
+The plugin reads each brief before the subagent starts and picks a model that fits the task:
 
-The plugin calls no Claude or OpenAI API; the work stays inside your subscriptions. The one paid API is TypeSafe's classifier Jev, which reads each task, at about $0.00005 per call. It is off until you turn it on; see [TypeSafe and Jev](#typesafe-and-jev).
+- Haiku for a search.
+- Sonnet for most edits and reviews.
+- Opus for hard work.
+- Codex, if you turn it on. A hard implementation task goes to Codex when its brief is self-contained: the brief holds everything that the task needs, so Codex needs nothing from the conversation. When Claude is near its limit, more tasks move to Codex. So your ChatGPT plan takes part of the work. A review can then go to the other model family: Codex reviews what Claude wrote, and Claude reviews what Codex wrote.
+
+The plugin calls no Claude or OpenAI API, so the work stays inside your plans. Codex can spend credits that you buy on top of your ChatGPT plan. The plugin blocks that unless you allow it, with one exception in [Known limits](#known-limits). The one paid API is Jev, at about $0.00005 per call.
+
+Whether the routing saves money on your work is not proven for you yet. The [offline evaluation](EVALUATION.md) measures it.
 
 ## Requirements
 
-- Claude Code with a Claude subscription. The plugin changes which model a subagent uses; it calls no Claude API itself.
+- Claude Code with a Claude plan.
 - Node.js 20 or newer. The plugin has no npm dependencies.
-- For the routing: a TypeSafe API key for Jev, the classifier that reads each brief. Jev is off until you turn it on; see [TypeSafe and Jev](#typesafe-and-jev).
-- Optional: the Codex CLI with a ChatGPT login, to send work to Codex. Codex jobs need macOS or Linux. On Windows the routing between Claude models works, and Codex stays off.
+- For the routing: a TypeSafe API key for Jev.
+- Optional: the Codex CLI with a ChatGPT login, to send work to Codex. Codex jobs need macOS or Linux. On Windows, the routing between Claude models works, and Codex stays off.
 
 ## Install
 
-This repository is also a marketplace (a catalog of plugins that Claude Code can install from), in `.claude-plugin/marketplace.json`. Add it once, then install the plugin for one project:
+This repository is also a marketplace: a catalog of plugins that Claude Code can install from. The file `.claude-plugin/marketplace.json` defines it. Add the marketplace once:
 
 ```bash
 claude plugin marketplace add robertanton81/claude-subagent-router
 ```
 
+Then install the plugin for one project:
+
 ```bash
 cd /path/to/your-project && claude plugin install subagent-router@claude-subagent-router --scope local
 ```
 
-`--scope local` writes the switch to `.claude/settings.local.json` of that project, which git does not track. Leave `--scope` out to turn the plugin on in every project. `claude plugin marketplace update claude-subagent-router` fetches a new version.
+- `--scope local` turns the plugin on only in that project. It writes this setting to `.claude/settings.local.json`, which Git does not track.
+- Leave out `--scope` to turn the plugin on in every project.
+- `--scope` decides where the plugin is on. The settings file, `~/.claude/orchestrator/config.json`, is one file per user. It applies in every project where the plugin is on.
+- If you already have a TypeSafe key, the command in [Turn on Jev](#turn-on-jev) installs the plugin and stores the key in one step.
+- `claude plugin marketplace update claude-subagent-router` fetches a new version.
+- If you still have the old `orchestrator@llm-orchestrator`, follow the steps under 0.3.0 in [CHANGELOG.md](CHANGELOG.md) first.
 
-Then follow the setup below. Until you turn Jev on, the hook sends nothing to TypeSafe and changes no route.
+Until you turn Jev on, the plugin sends nothing to TypeSafe and picks no model. [While Jev is off](#while-jev-is-off) lists what still works.
 
 ## Setup
 
-Run the check at any time with `/subagent-router:setup` in a session. From a clone of this repository the same check is `node scripts/setup-check.mjs --live`. It never prints a secret.
+Do the steps in this order. Each optional step adds one feature.
 
-0. **Settings.** Run `/subagent-router:configure` in a session and answer its questions, or leave everything at its default and come back to the [Configuration](#configuration) section later. Codex stays off until you turn it on.
-1. **Codex CLI (only to use Codex).** Install it, run `codex login` with your ChatGPT account, and turn Codex on with `/subagent-router:configure` or `node scripts/orch-config.mjs set codexEnabled=true`.
-2. **Jev and its key (for the routing).** Follow the four steps in [TypeSafe and Jev](#typesafe-and-jev): create a key, store it in the plugin option, set `jevEnabled` to true, and check it.
-3. **Status line log (optional).** The limit rule and the measurement need the two rate limit percentages, their reset times and the session id. Only the status line receives them. Paste the lines from [scripts/statusline-snippet.sh](scripts/statusline-snippet.sh) into your status line script, after the place where it reads `rate_limits`. The block reads the variables `RATE_5H`, `RATE_7D`, `RATE_5H_RESET`, `RATE_7D_RESET` and `SESSION_ID`; set the ones your script has, and the others are written as null. Without this file the limit rule is off, and everything else works. When the file exists but its sample is too old (`limitsMaxAgeMs`, 10 minutes by default) or cannot be read, the session start says once per session that the limit rule is off. This happens in the Claude Code desktop app, which runs no status line. `node scripts/setup-check.mjs` says when the file is there but comes from an older snippet without the reset times.
-4. **Permission for the Codex workers (optional).** The Codex workers run one Bash command. To avoid a prompt each time, allow it in your settings: `Bash(node */scripts/orch-codex.mjs *)`.
+If you installed from the marketplace, use the skills in a session: `/subagent-router:configure`, `/subagent-router:setup` and `/subagent-router:report`. The `node scripts/...` commands in this README do the same work, but they run from a clone of this repository: `git clone https://github.com/robertanton81/claude-subagent-router`.
+
+### Turn on Jev
+
+1. Create a key in the TypeSafe console: https://console.typesafe.ai/keys.
+2. Store the key in the plugin option. A plugin option is a setting that Claude Code keeps for the plugin and passes only to the plugin's hooks. A hook is a script that Claude Code runs at a fixed event, for example before each subagent call. Copy the key, then run this in a terminal, in the project folder:
+
+   ```bash
+   k=$(pbpaste) && claude plugin install subagent-router@claude-subagent-router --scope local --config "typesafe_api_key=$k"; unset k; pbcopy </dev/null
+   ```
+
+   - Use the same `--scope` as your install. For an install in every project, leave out `--scope local`.
+   - `pbpaste` reads the key from the clipboard. So the key is never typed, printed or kept in the shell history. `pbcopy </dev/null` clears the clipboard. On Linux, use `xclip -o -selection clipboard` or `wl-paste` instead of `pbpaste`.
+   - The command also works when the plugin is already installed. It keeps the install and sets the option.
+   - Claude Code keeps a sensitive option in the macOS Keychain, or in `~/.claude/.credentials.json` on other systems. The Claude Code docs say that Claude Code can also ask for the option when you enable the plugin. That path was not tested here.
+   - The variable `TYPESAFE_API_KEY` works too, for example for scripts, CI, the evaluation runner, or on Windows. Set it in the environment that starts Claude Code.
+   - No other place is read: no key file in your home folder, and never a `.env` file in a project. A cloned repository could ship its own key there and then receive your briefs in its own TypeSafe account.
+3. Run `/subagent-router:configure` in a session and turn Jev on. Or run `node scripts/orch-config.mjs set jevEnabled=true`. A key alone does not turn Jev on. For one session, `ORCH_JEV_ENABLED=1` or `0` overrides the settings file.
+4. Start a new session and ask for a task that uses a subagent, for example: "Use a subagent to list the files that import the module `fs`." Then run `/subagent-router:setup`. Its row "TypeSafe key" should say that the hook found the key in the plugin option.
+
+### Turn on Codex (optional)
+
+Codex stays off until you turn it on.
+
+1. Install the Codex CLI and run `codex login` with your ChatGPT account.
+2. Turn Codex on with `/subagent-router:configure`, or with `node scripts/orch-config.mjs set codexEnabled=true`. For one session, start Claude Code with `ORCH_CODEX_ENABLED=1`. The variable wins over the settings file, so `ORCH_CODEX_ENABLED=0` turns Codex off for one session.
+3. Optional: the plugin has two Codex workers, small subagents that start Codex; see [The workers](#the-workers). Each one calls `scripts/orch-codex.mjs` with Bash: `run` once, then `wait` up to 6 times while the job still runs. To avoid a permission question each time, allow the script in your settings: `Bash(node */scripts/orch-codex.mjs *)`. The first `*` matches any folder, so this also allows a script with the same name in any other clone.
+
+### Add the status line log (optional)
+
+The limit rules move work to Codex, or cap models at Sonnet, when Claude is near its limit. The status line is the line at the bottom of Claude Code that a script of yours prints. Only that script receives your Claude usage numbers.
+
+- Paste the lines from [scripts/statusline-snippet.sh](scripts/statusline-snippet.sh) into your status line script, after the place where it reads `rate_limits`.
+- The lines read the variables `RATE_5H`, `RATE_7D`, `RATE_5H_RESET`, `RATE_7D_RESET` and `SESSION_ID`. `RATE_5H` and `RATE_7D` are the percentages used in the 5-hour window and in the weekly (7-day) window. Set the ones your script has. The others are written as null.
+- The limit rules need at least one of the two percentages. A window without a percentage never counts. The pace rule also needs the reset times. The snippet saves the session id too, but the limit rules do not use it.
+- The lines write one sample, one reading of your usage, to `~/.claude/orchestrator/limits-latest.json`: the status line log. Without this file, the limit rules are off. Everything else works.
+- A sample is too old after `limitsMaxAgeMs`, 10 minutes by default. When the sample is too old or cannot be read, the limit rules are off too. While Jev is on in `enforce` mode, the session start then says so once per session.
+- The Claude Code desktop app runs no status line. All sessions on the machine read the same sample file. So in the desktop app, the limit rules act only while a terminal session on the same machine writes fresh samples.
+- The setup check says when the file comes from an older snippet without the reset times.
+
+### Check the setup
+
+Run `/subagent-router:setup` in a session, or `node scripts/setup-check.mjs` from a clone. The check never prints a secret. The script names the next step for some items that are not OK, and the skill adds a next step for each of them.
+
+Claude Code passes the plugin option only to hooks, so the check cannot see the key itself. Its row "TypeSafe key" reports where the routing hook found the key on its last routed call. `--live` also sends one test request to TypeSafe, but only when the key is in `TYPESAFE_API_KEY` and Jev is on.
 
 ## What leaves your machine
 
-- **To TypeSafe, only while Jev is on:** the brief (the prompt) of each `Agent` call that the hook routes, and the `Verification:` part of each answer from the plugin's own workers (at most 2,000 characters; the file list and the rest of the answer stay here). Nothing else. A brief can hold code and project rules, and a verification part can quote test output. Set `"routeOtherAgents": false` to keep the briefs of agent types other than the plugin's own workers on your machine, or set `"mode": "off"` to send none.
-- **To OpenAI, only while Codex is on:** the task brief and an instruction snapshot for implement tasks and custom reviews. The snapshot includes personal `CLAUDE.md` and `.claude/rules/`, plus project and parent `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md`, `.claude/rules/`, and allowed imports. The two rule switches below control personal and project sources separately. Project imports and symlinks cannot leave their source boundary; see “Instruction snapshot” below.
-- **Nothing else.** The dispatch log, the Codex jobs and the settings stay in `~/.claude/orchestrator/`, readable only by your user. The TypeSafe key is never written to a log.
+**To TypeSafe, only while Jev is on:**
 
-## TypeSafe and Jev
+- For each subagent call that the routing hook sends to Jev: the call's description, its whole brief and the text of five questions. By default this is almost every subagent call of the main session. The hook sends nothing for a call from inside a subagent, for `statusline-setup` and `claude-code-guide`, and for the agent types that you exclude below. An `orch-route: keep` line does not stop the send.
+- When one of the plugin's own workers finishes: the `Verification:` part of its answer (the lines that say which checks ran), at most 2,000 characters, with one question. The file list and the rest of the answer stay on your machine.
+- A brief can hold code and project rules. A verification part can quote test output.
+- To send less: `"routeOtherAgents": false` keeps the briefs of all agent types outside the plugin on your machine. `keepModelAgents` does the same for the agent types that it names. `"mode": "off"` sends nothing, and so does `"jevEnabled": false`, the default.
+- `jevUrl` and `ORCH_TYPESAFE_URL` change where these requests go.
 
-**What it is.** [TypeSafe](https://typesafe.ai) is a third-party API. Its model Jev is a classifier: it does not write text, it answers fixed questions with probabilities. The plugin asks Jev five questions about each brief: the kind of task, whether it changes files, whether the brief is self-contained, how hard it is, and whether the answer must name every match. A table in code turns the answers into a route. When one of the plugin's workers finishes, the log hook asks one more question: did the checks named in its `Verification:` line pass, fail, or not run? The report counts the answers. Before, a word search did this and read "0 fail" or "no errors" as a failure. The questions are in [scripts/lib/questions.mjs](scripts/lib/questions.mjs).
+**To OpenAI, only while Codex is on:**
 
-**Why the plugin uses it.** The routing needs a judgment about each task, and asking a Claude model for it would spend the same subscription the plugin tries to save. Jev answers in a few hundred milliseconds, and it costs much less than one subagent start.
+- The brief of each implement task, custom review and consult question, with an instruction snapshot: your personal and project Claude instruction files and their allowed imports. `codexIncludeUserRules` and `codexIncludeProjectRules` turn off the personal part and the project part. See [Instruction snapshot](REFERENCE.md#instruction-snapshot).
+- Anything that Codex reads while it works. Its sandbox, the limits that Codex puts on its own commands, restricts where Codex can write. It does not restrict what Codex can read. So a job can read any file that your user can read, also outside the project, for example the dispatch log in `~/.claude/orchestrator/`. Write in the brief what Codex may read.
 
-**It is opt-in.** Jev is off until you turn it on, like Codex. While it is off:
-
-- The hook sends nothing to TypeSafe and does not look for a key.
-- It changes no model. The orchestrator can still pick the plugin's workers, and each runs on the model of its agent file: `searcher` on Haiku, `implementer` on Sonnet, and so on.
-- The rest still works: the Codex workers and their transport, the move of a Codex task to Claude while Codex has no room, the writer lock for the plugin's own workers, and the log.
-- The usage rules do not act, because they work through the routing table: nothing moves to Codex and nothing is capped at Sonnet when Claude usage is high.
-
-**Turn it on:**
-
-1. Create a key in the TypeSafe console: https://console.typesafe.ai/keys.
-2. Store the key in the plugin option. Copy the key, then run this in a terminal. Add the `--scope` of your install, for example `--scope local` in the project folder:
-
-   ```bash
-   k=$(pbpaste) && claude plugin install subagent-router@claude-subagent-router --config "typesafe_api_key=$k"; unset k; pbcopy </dev/null
-   ```
-
-   `pbpaste` reads the key from the clipboard, so it is never typed, printed or kept in the shell history, and `pbcopy </dev/null` clears the clipboard. On Linux, use `xclip -o -selection clipboard` or `wl-paste` instead of `pbpaste`. The command also works when the plugin is already installed: it keeps the install and sets the option. Claude Code keeps a sensitive option in the macOS Keychain, or in `~/.claude/.credentials.json` on other systems, and passes it only to this plugin's hooks. The Claude Code docs also describe a prompt for the option when the plugin is enabled. For scripts, CI and the evaluation runner, the variable `TYPESAFE_API_KEY` works too. No other place is read: no key file in your home folder, and never a `.env` in a project, because a cloned repository could ship its own key and receive your briefs in its own TypeSafe account.
-3. Set `"jevEnabled": true` with `/subagent-router:configure` or `node scripts/orch-config.mjs set jevEnabled=true`. For one session, `ORCH_JEV_ENABLED=1` or `0` overrides the file. A key alone does not turn Jev on.
-4. Start a new session and let it delegate one task, then run `/subagent-router:setup`. Claude Code passes the plugin option only to hooks, so the check cannot see the key itself; its row "TypeSafe key" reports where the hook found the key on its last routed call.
-
-**What it sends.** One request per routed `Agent` call: the call's description and its whole prompt, plus the five questions. Nothing else from your machine. A prompt can hold code and project rules. `"routeOtherAgents": false` limits the requests to calls to the plugin's own workers, and `"mode": "off"` stops them all. TypeSafe states that Jev is not trained on customer requests; see its [data handling](https://docs.typesafe.ai/models) and [legal](https://docs.typesafe.ai/legal) pages.
-
-**What it costs.** Jev is paid per input token: $0.042 per million tokens for Jev 1.13 (output is free; price from docs.typesafe.ai/models, checked 2026-09-24). A routed brief measured about 1,000 to 1,700 tokens, so a call costs about $0.00005, or about $1 per 20,000 dispatches. The question about a finished worker's checks sends one short question and at most 2,000 characters, so it costs less than a routing call. `/subagent-router:report` counts the calls and shows how many of them changed a route. When that share stays near zero, Jev costs money and saves nothing, and you can turn it off.
-
-**When it fails.** On a timeout (`jevTimeoutMs`, 5 seconds by default), an HTTP error or a missing key, the call runs as the orchestrator wrote it. The key is never written to a log; an error text from TypeSafe has the key removed before it is stored.
+**Nothing else.** The plugin keeps the dispatch log, the Codex jobs and the settings in `~/.claude/orchestrator/`, readable only by your user. A Codex job can still read them, as described above. The TypeSafe key is never written to a log.
 
 ## How it works
 
-1. The main Claude Code session is the orchestrator. It hands work to seven workers.
-2. A `PreToolUse` hook (a script that Claude Code runs before a tool call) sees every `Agent` call.
-3. The hook sends the brief to Jev, the TypeSafe classifier. Jev answers five questions: the kind of task, whether it changes files, whether the brief is self-contained, how hard it is, and whether the answer is only right if it names every match.
-4. A table in code maps the answers to a route. For a call to one of our workers, the route is a worker and a model. For a call to any other agent type, the route is only a model. When Jev is confident, the hook rewrites the call. When Jev is not confident, the orchestrator's choice stands.
-5. The hook writes every dispatch to a log, with the orchestrator's choice next to Jev's choice.
+1. The main session hands work to subagents: the plugin's seven workers, or any other agent type. The report calls the main session the orchestrator.
+2. The plugin's routing hook sees every subagent call. It runs before each call of the `Agent` tool.
+3. While Jev is on, the routing hook sends the brief to Jev and gets answers to [five questions](#what-jev-is-asked) about the task.
+4. A table in code turns the answers into a route. For a call to one of the plugin's workers, the route is a worker and a model. For a call to any other agent type, the route is only a model.
+5. When Jev is confident, the hook rewrites the call. When Jev is not confident, the call runs as the main session wrote it.
+6. The hook writes every dispatch (one subagent call) to the dispatch log, with the main session's choice next to the table's route.
+
+### The workers
 
 | Worker | Runs on | Effort | Job |
 | :-- | :-- | :-- | :-- |
 | `subagent-router:searcher` | Haiku | none | Finds and explains code. Changes no files. |
-| `subagent-router:complete-searcher` | Sonnet | `low` | Lists every match when the answer must be complete. Changes no files. A search the orchestrator sends to it stays there. |
+| `subagent-router:complete-searcher` | Sonnet | `low` | Lists every match when the answer must be complete. Changes no files. |
 | `subagent-router:implementer` | Sonnet | `high` | Writes and changes code inside a defined scope. |
 | `subagent-router:debugger` | Opus | `medium` | Finds the cause of a failure. |
 | `subagent-router:reviewer` | Sonnet | `high` | Reviews changes. Changes no files. |
-| `subagent-router:codex-implementer` | Codex CLI | Codex settings | Implements a task on the ChatGPT plan. Needs a complete brief. A task the orchestrator sends to it stays there while Codex can take it. |
-| `subagent-router:codex-reviewer` | Codex CLI | Codex settings | Reviews the uncommitted changes, a branch or a commit. A review the orchestrator sends to it stays there while Codex can take it, unless Codex wrote the change. |
+| `subagent-router:codex-implementer` | Codex CLI, started by a small Haiku agent | from `~/.codex/config.toml` | Implements a task on the ChatGPT plan. Needs a self-contained brief. |
+| `subagent-router:codex-reviewer` | Codex CLI, started by a small Haiku agent | from `~/.codex/config.toml` | Reviews the uncommitted changes, a branch or a commit. |
 
-Effort is how much the model thinks before it answers. Each Claude worker sets it in its agent file, at the default of its own model (Sonnet 5 `high`, Opus 5.5 `medium`), so the session's effort does not carry over to the workers. Haiku 4.5 takes no effort. The level stays when the hook changes the model: an implementer moved to Opus runs at `high`. The variable `CLAUDE_CODE_EFFORT_LEVEL` overrides it. The Codex workers use the model and effort of `~/.codex/config.toml`, unless the brief has a `codex-model:` or `codex-effort:` line.
+Effort is how much the model thinks before it answers. Each worker sets it in its agent file, so the effort of your session does not carry over; see [Effort](REFERENCE.md#effort).
 
-Reviews cross the model families: Codex reviews changes from Claude, and the Claude reviewer reviews changes from Codex.
+When the main session calls one of these workers by name, the table still routes the task like any other task. The name counts only for `complete-searcher` and the two Codex workers. So while Codex is on, a direct call to `implementer`, `debugger` or `reviewer` can move to Codex, and a direct call can get another model, for example Opus for a hard task. See [Direct calls to the plugin's workers](REFERENCE.md#direct-calls-to-the-plugins-workers).
+
+**The cross-review rule.** While Jev is on, a review goes to the other model family than the one that wrote the change:
+
+- The Claude reviewer reviews a change that Codex wrote.
+- Codex reviews a change that Claude wrote, when Codex can take work and the review brief is self-contained (`selfContainedGate`). A direct call to the Codex reviewer also goes to Codex, even when its brief is not self-contained.
+- Otherwise, the Claude reviewer reviews the Claude change.
 
 ### Other agent types
 
-Other agent types are the built-in agents (`Explore`, `Plan`, `general-purpose`), a project's own agents, and the agents of other plugins. Many projects start such agents from their own skills, for example a plan skill that starts a plan reviewer.
+Other agent types are the built-in agents (`Explore`, `Plan`, `general-purpose`), a project's own agents, and the agents of other plugins. Many projects start such agents from their own skills, for example a plan skill that starts a plan reviewer. For these calls, the plugin picks only the model:
 
-For these calls the plugin decides the model, and the agent file keeps the rest:
+- The hook sets `model` and does not change `subagent_type`. So the agent keeps its system prompt, its tools, its preloaded skills and its answer format. A project skill often reads that answer in a fixed format, and a swap to one of the plugin's workers would break it. The one exception is `codex:codex-rescue`; see [Codex](#codex).
+- The `model` of a call comes first in Claude Code's order of model sources. So the hook's model wins over the `model:` line of the agent file, and over a model that a skill named in the call.
+- Such a call never moves to Codex.
 
-- The hook sets only `model`. It never changes `subagent_type`. So the agent keeps its system prompt, its tools, its preloaded skills and its answer format. A project skill often reads that answer in a fixed format, and a swap to one of our workers would break it.
-- The `model` of a call comes first in the model order of Claude Code. So the hook's model wins over the `model:` line of the agent file, and over a model that a skill named in the call.
-- The table is the Claude part of the table for our workers: a search runs on `haiku`, an exact edit on `haiku` or `sonnet`, an implementation on `sonnet`, or on `opus` when it is hard, a debug task on `opus`, and a review on `sonnet`. A design task and anything else keep the model of the call.
+The table uses the same models as the Claude routes of the plugin's workers:
 
-The hook leaves a call alone in these cases:
+| Kind of task | Model |
+| :-- | :-- |
+| Search | `haiku` |
+| Exact edit (the brief states the change exactly) | `haiku` or `sonnet` |
+| Implementation | `sonnet`, or `opus` when it is hard |
+| Debugging | `opus` |
+| Review | `sonnet` |
+| Design, or anything else | the model of the call |
 
-- The call comes from inside a subagent.
-- The agent type is `statusline-setup` or `claude-code-guide`. Claude Code runs them on a fixed model.
-- The agent type is on the list `keepModelAgents` in `config.json`. Jev sees only the brief and never the agent file. So it cannot know that an agent runs on a small model on purpose, for example a narrow yes-or-no check on `haiku`. The table would send that review to `sonnet`. Put such an agent on the list by its exact name.
-- `routeOtherAgents` is `false`. `ORCH_ROUTE_OTHER_AGENTS=0` does the same for one session.
+**Keep an agent on its model.** Jev sees only the brief and never the agent file. So it cannot know that an agent runs on a small model on purpose, for example a narrow yes-or-no check on `haiku`. The table would send that review to `sonnet`. Put such an agent on the list `keepModelAgents`, by the name that the call uses in `subagent_type`: `spec-compliance-reviewer` for a project agent, `plugin-name:agent-name` for another plugin's agent. The agent then runs on the model named in the call, or on the model of its agent file when the call names none. The list works only for agents outside this plugin: the plugin's own workers and `codex:codex-rescue` on the list have no effect.
 
-The briefs of these calls go to TypeSafe, like the briefs for our workers. A project brief can hold code and project rules. With `"routeOtherAgents": false`, such a brief stays on your machine.
+### When a plan is near its limit
 
-### Codex is opt-in
+- **Claude is near its limit** when its 5-hour or its weekly window is at 80 percent or more (`limitGate`), or is on pace to reach 100 percent before the window resets.
+- **Codex cannot take work** while it is off, while it is paused after a usage limit, or while it is used up and `codexSpendCredits` is false.
+- **Codex is near its limit** when the usage numbers that its last job saved are at 80 percent or more.
 
-Codex is off until you turn it on. While it is off:
+| Situation | What happens |
+| :-- | :-- |
+| Codex cannot take work | In `enforce` mode, tasks for the Codex workers run on Claude workers. |
+| Claude is near its limit, Codex can take work, and Codex is not near its limit | Implementations, most edits, and debug tasks that change files go to Codex, when their brief is self-contained. Searches, reviews and diagnoses keep their route. |
+| Claude is near its limit, and Codex cannot take work | The hook lowers every route that it picks from Opus to Sonnet. A call that the hook leaves alone keeps its model, even Opus. |
+| Codex is near its limit, and Claude is not | Hard implementations run on Claude, on Opus. A direct call to the Codex implementer is no longer kept on Codex. |
+| Both are near their limits, and Codex can take work | Every task takes its normal route. |
+| Claude is used up | The main session stops. Go on in Codex by hand. |
+
+The rules that depend on Claude's usage need Jev on and the status line log. In `enforce` mode, Claude Code shows a notice once per session when work moves to Codex because Claude is near its limit, when a model is lowered to Sonnet, and when a task for a Codex worker falls back to its Claude counterpart. Some moves show no notice; see [When a plan is near its limit](REFERENCE.md#when-a-plan-is-near-its-limit) for the exact conditions.
+
+### Safety rules
+
+**The hook fails open:** when something goes wrong, it lets the call run instead of blocking it. When the Jev call fails or the hook finds no key, the hook does not route the call. When the hook itself fails with an error, it prints nothing, and the call runs as the main session wrote it. The Jev timeout is `jevTimeoutMs`, 5 seconds by default. An error text from TypeSafe has the key removed before it is stored.
+
+**The writer lock** is the one case in which the hook refuses a call on purpose. A writer is a task that changes files: a Codex implement job, or the plugin's `implementer` or `debugger`. In `enforce` mode, while one writer changes a checkout (one git working tree), the hook denies:
+
+- a second writer or a reviewer of the plugin;
+- a call to another agent type when Jev says that its task changes files.
+
+So of two Claude writers sent in one message, only the first runs. A Codex implement job takes the lock only when the job starts. So a Claude writer sent in the same message can take the lock first, and the Codex job then fails with `writer_busy`. Edits by the main session are not covered. Time limits and stuck locks: see [The writer lock](REFERENCE.md#the-writer-lock).
+
+## TypeSafe and Jev
+
+[TypeSafe](https://typesafe.ai) is a third-party API. Its model Jev is a classifier: it writes no text, and it answers fixed questions with probabilities.
+
+The plugin uses Jev because the routing needs a judgment about each task. Asking a Claude model would spend the same plan that the plugin tries to save. Jev answers in a few hundred milliseconds, and it costs much less than one subagent start.
+
+### What Jev is asked
+
+For each routed brief, Jev answers five questions:
+
+1. What kind of task is it?
+2. Does it change files?
+3. Is the brief self-contained, so that a worker needs nothing from the conversation?
+4. How hard is it?
+5. Is the answer only right if it names every match?
+
+A table in code, [scripts/lib/routing-table.mjs](scripts/lib/routing-table.mjs), turns the answers into a route. The questions are in [scripts/lib/questions.mjs](scripts/lib/questions.mjs).
+
+When one of the plugin's workers finishes, the log hook, the plugin's hook that records the end of each worker, asks one more question about the `Verification:` part of the answer. Did the checks pass, fail or not run, or is it unclear? The report counts the answers. Without a Jev answer, the report uses a word search instead, which can read "0 fail" or "no errors" as a failure. The report uses the word search while Jev is off, after a failed Jev call, and for older records.
+
+### While Jev is off
+
+Jev is off until you turn it on, like Codex. While it is off:
+
+- The routing hook sends nothing to TypeSafe and does not look for a key.
+- The hook picks no model. The main session can still pick the plugin's workers, and each runs on the model of its agent file: `searcher` on Haiku, `implementer` on Sonnet, and so on.
+- The rest still works:
+  - the Codex workers, which hand each task to Codex through a stored request file;
+  - the move of a Codex task to Claude while Codex cannot take work;
+  - the redirect of `codex:codex-rescue` while Codex is on;
+  - the writer lock for the plugin's own workers;
+  - the log.
+- The limit rules do not act, because they work through the routing table. Nothing moves to Codex, and nothing is capped at Sonnet when Claude is near its limit.
+- The report judges worker checks with the word search.
+
+### Cost and data policy
+
+- You pay for Jev per input token: $0.042 per million tokens for Jev 1.13. Output is free. The price is from docs.typesafe.ai/models, checked on 2026-09-24.
+- In our measurements, a routed brief had about 1,000 to 1,700 tokens. So a call costs about $0.00005, or about $1 per 20,000 dispatches.
+- The question about a finished worker's checks sends one short question and at most 2,000 characters. It costs less than a routing call.
+- `/subagent-router:report` counts the calls and shows how many of them changed a route. When that share stays near zero, Jev costs money and saves nothing, and you can turn it off.
+- TypeSafe states that Jev is not trained on customer requests. See its [data handling](https://docs.typesafe.ai/models) and [legal](https://docs.typesafe.ai/legal) pages.
+
+## Codex
+
+The Codex CLI runs coding tasks on your ChatGPT plan. The plugin can send implement tasks and reviews to it, and you can ask it questions by hand. To turn it on, see [Setup](#turn-on-codex-optional).
+
+**While Codex is off:**
 
 - The routing table sends no task to Codex. Reviews go to `subagent-router:reviewer`.
-- A direct call to a Codex worker runs on its Claude counterpart, `implementer` or `reviewer`, on Sonnet. Claude Code shows one notice per session.
-- The runner starts no Codex job in any mode, and it does not even run `codex login status`.
-- A call to the Codex plugin's own agent `codex:codex-rescue` passes unchanged. The hook redirects it to `subagent-router:codex-implementer` only while Codex is on.
+- In `enforce` mode, a direct call to a Codex worker runs on a Claude worker.
+- The Codex runner, the plugin's script that starts and watches Codex jobs, starts no job in any mode. It does not even run `codex login status`.
+- A call to `codex:codex-rescue` passes unchanged. That agent belongs to OpenAI's separate Codex plugin for Claude Code.
 - The setup check reports `Codex: off` and skips the Codex CLI checks.
-- When Claude usage is high, no work can move to Codex. The hook then picks no model above Sonnet. See the next section.
 
-To turn Codex on for all sessions, put `"codexEnabled": true` in `~/.claude/orchestrator/config.json`. For one session, start Claude Code with `ORCH_CODEX_ENABLED=1`. The variable wins over the file, so `ORCH_CODEX_ENABLED=0` turns Codex off for one session.
+**The `codex:codex-rescue` redirect.** OpenAI's Codex plugin has an agent `codex:codex-rescue` that describes itself as one to use proactively, so the main session may pick it on its own. That agent starts Codex outside this plugin, so the writer lock and the credit checks do not apply to it. So while Codex is on, in `enforce` mode, the hook sends a call to `codex:codex-rescue` to `subagent-router:codex-implementer`. It does this also when the brief has `orch-route: keep`. This blocks one known way to skip the routing, but other ways still exist. It also means that `/codex:rescue` runs the plugin's Codex implementer. To use OpenAI's agent, start the session with `ORCH_MODE=off`. This turns off all routing for that session.
 
-The hook fails open. On a timeout, an HTTP error, a missing key or any bug, it prints nothing, and the call runs as the orchestrator wrote it. There is one deliberate "no": in `enforce` mode the hook denies a writer or a reviewer of the plugin while another writer still changes files in the same checkout. A checkout is the root of the git working tree, so a writer in `repo/src` and a writer in `repo` count as the same checkout; another worktree is a checkout of its own. The other writer is a Codex job, or a Claude writer (`implementer`, `debugger`) that runs as a subagent. A Claude writer takes the lock when the hook lets it through, so of two writers sent in one message only the first runs. It also denies an agent type of another owner, such as `general-purpose`, when Jev says that its task changes files. Without a Jev answer such a call runs.
+**Credits and pauses.** When a Codex plan window, the 5-hour or the weekly one, reaches 100 percent, Codex goes on and spends your bought credits. The plugin blocks that by default:
 
-### When one subscription has no room
+- While the saved plan numbers show a window at 100 percent, the plugin starts no Codex job. This block ends at the reset time.
+- After a job fails with a usage limit, the plugin starts no Codex job until the time that Codex named, or for one hour when it cannot read a time. Delete `codex-unavailable.json` in the data folder (`~/.claude/orchestrator/` by default) to end this pause early. This does not end the block in the bullet above.
+- `"codexSpendCredits": true` allows credits. In `enforce` mode, routed Codex tasks still go to Claude during a pause. Details: [Credits and pauses](REFERENCE.md#credits-and-pauses).
 
-The work goes on with the other provider, and you are told once per session. The first two rules apply only while Codex is on.
+**Ask Codex a question.** For a design question or a second opinion that is not a code review, use `consult`. The question comes on stdin, never on the command line:
 
-- **Codex has no room.** Every task for a Codex worker runs on its Claude counterpart: `implementer` or `reviewer`, on Sonnet. Claude Code shows a notice, and a new session shows it at its start.
-- **Claude has little room.** From 80 percent of the 5-hour or the 7-day window, tasks with a complete brief run on Codex. This needs the status line log from the setup below. A window also counts as full when the usage so far, continued at the same speed, reaches 100 percent before the window resets (the pace rule): 50 percent used after two hours of the 5-hour window is on pace for 125 percent, so it counts; 50 percent used after four hours is on pace for 63 and does not. The pace rule needs the reset times from the status line log, it counts only after 20 percent of a window has passed, and the notice then names the pace. `"pacing": false` in `config.json` turns it off; `"paceAfter"` moves the 20 percent.
-- **Claude has little room, and Codex cannot take work.** Codex cannot take work while it is off, paused or used up. From 80 percent, the hook then picks no model above Sonnet: a hard task and a debug task run on Sonnet, not on Opus. This holds for our workers and for other agent types, and it needs the status line log too. The rule covers only the routes that the table picks. A call that the table leaves alone can still run on Opus.
-- When both are at 80 percent or more, and Codex can still take work, every task takes its normal route.
-- One thing the plugin cannot do: the main session is a Claude session. When Max is fully used up, that session stops, and no hook runs. You then go on in Codex by hand.
+```bash
+node scripts/orch-codex.mjs consult --effort high < question.md
+```
 
-Codex and credits: when a Codex plan window (the 5-hour or the weekly one) reaches 100 percent, Codex does not stop. It goes on and pays from your bought credits. The plugin does not allow that by default. It treats 100 percent as "no room" and starts no Codex job until the reset time. After a job fails with a usage limit, it also starts no Codex job until the time that Codex named. To allow credits, set `"codexSpendCredits": true` in `config.json`. After each job, the `CODEX_JOB` line shows `codex_used=<percent>`, and a run that was paid from credits says so, with the balance.
+Codex answers in the read-only sandbox, so it changes no files. It can still read files outside the project; see [What leaves your machine](#what-leaves-your-machine). More in [Ask Codex a question](REFERENCE.md#ask-codex-a-question).
 
-### How a task reaches Codex
-
-Task text is not trusted. It can quote a web page or an issue. So it never goes into a shell command:
-
-1. The hook stores the task in `~/.claude/orchestrator/codex-requests/<request id>.json`.
-2. The thin Codex worker receives only `codex-request: req-<12 hex characters>`. It never sees the task text.
-3. The worker runs `node scripts/orch-codex.mjs run <request id>`. The id has a fixed shape, and the command checks it.
-4. The runner removes `CODEX_API_KEY` and `OPENAI_API_KEY` from Codex's environment and checks `codex login status`. Without a ChatGPT login the job stops, so a run is never billed at API rates.
-5. The runner adds a Claude instruction snapshot to implement briefs and custom review briefs. Codex also discovers its own `AGENTS.md` files. Scoped reviews (`--uncommitted`, `--base`, `--commit`) receive no brief and no snapshot.
-6. A request id works only for the session, the folder and the kind of job that stored it.
-
-### Instruction snapshot
-
-Personal instructions load first: `~/.claude/CLAUDE.md` and all Markdown files under `~/.claude/rules/`. Project sources follow from the filesystem root down to the task folder. Each level contributes `CLAUDE.md`, `.claude/CLAUDE.md`, recursive `.claude/rules/`, then `CLAUDE.local.md`. A rule keeps its YAML `paths` condition and its base directory. Codex is told to apply it only to matching files; the runner does not enforce that condition.
-
-Imports such as `@guides/testing.md` expand relative to the containing file. Absolute paths and `~/` paths also work. Imports in backticks or fenced code blocks stay literal. Expansion stops at four hops and detects cycles. Import paths containing whitespace are not supported. Within a checkout, project imports and symlinks must stay inside that checkout. An ancestor outside the checkout may reference files inside its own directory. Each imported file keeps the original boundary. Personal instruction imports are trusted, but conventional credential filenames such as `.env`, `.credentials.json`, `.npmrc`, private key files, and anything under `.git/` are skipped.
-
-The runner cannot inspect Claude's external-import approval state. It therefore skips project imports outside their boundary even if you approved them in Claude. It records skipped sources and truncation in `job.json` under `rules` and warns on stderr. File content is limited to 16,000 characters per file and 128,000 characters in total, with at most 256 file reads and 256 import attempts. The final snapshot is capped at 160,000 characters, including labels. Diagnostics and rule traversal also have bounds. Sources load in the order above, so a limit can omit later, more specific instructions. Check the recorded notes when a warning appears.
-
-This is a file snapshot, not a copy of the Claude session. It does not load instructions on demand from child directories, managed policy, auto memory, additional directories, or Claude settings such as `claudeMdExcludes`. Put any extra instructions needed by the task in its brief. Turning off a rule switch stops automatic discovery for that scope; an explicit import in an enabled source still follows the import rules above.
+[REFERENCE.md](REFERENCE.md#codex) also covers how a task reaches Codex safely, the sandbox settings of each job, the instruction snapshot, custom and scoped reviews, and long runs and failures.
 
 ## Use
 
-After the install and the setup, work as usual. The hook routes each subagent call by itself, and every dispatch goes to the log. `/subagent-router:report` shows what the routing did, and `/subagent-router:configure` changes the settings.
+After the install and the setup, work as usual. The routing hook routes each subagent call by itself, and every dispatch goes to the log. `/subagent-router:report` shows what the routing did; see [The report](REFERENCE.md#the-report). `/subagent-router:configure` changes the settings.
 
-### Work on the plugin
+### Why was a call not rerouted?
 
-Clone the repository and load it for one session with a flag:
+The common causes, with the `reason` that the log shows:
+
+- Jev is off, which is the default: `jev_disabled`.
+- The hook found no key: `error_no_key`.
+- Jev was not sure of the kind of task: `low_confidence`.
+- The agent type is on `keepModelAgents`: `keep_model_agent`.
+- The table picked what the call already had: the action is `agree`.
+
+This command prints the last five dispatches from the log: the time, the agent and model that the main session asked for, the agent and model after routing, the action and the reason. A model is `null` when the call named none; the model of the agent file then ran. For the action `deny`, nothing ran. The command prints no brief.
 
 ```bash
-claude --plugin-dir /path/to/claude-subagent-router
+node -e '
+const fs = require("fs"), path = require("path"), os = require("os");
+const file = path.join(process.env.ORCH_DATA_DIR || path.join(os.homedir(), ".claude/orchestrator"), "dispatch-log.jsonl");
+if (!fs.existsSync(file)) { console.log("no dispatch log yet"); process.exit(0); }
+const records = fs.readFileSync(file, "utf8").trim().split("\n").slice(-500).map((line) => JSON.parse(line));
+for (const r of records.filter((r) => r.event === "dispatch").slice(-5)) {
+  console.log(r.ts, r.requested?.agent, r.requested?.model, "->", r.final?.agent, r.final?.model, r.action, r.reason);
+}'
 ```
 
-Do not use the flag in a project where the plugin is installed. After a change to the plugin files, run `/reload-plugins` in the session, or start a new one.
+Every action and reason is explained in [Actions in the log](REFERENCE.md#actions-in-the-log) and [Calls the hook leaves alone](REFERENCE.md#calls-the-hook-leaves-alone).
 
 ### Modes
 
-| Mode | What the hook does |
+| Mode | What the routing hook does |
 | :-- | :-- |
-| `enforce` (default) | Asks Jev and rewrites confident routes. Denies a second writer while a Codex job writes. |
-| `shadow` | Asks Jev and logs the route. Changes nothing. |
+| `enforce` (default) | Asks Jev, while Jev is on, and rewrites confident routes. Moves a task for a Codex worker to Claude while Codex cannot take work. Applies the writer lock. |
+| `shadow` | Asks Jev, while Jev is on, and logs the route that it would take. Changes no route. |
 | `off` | Logs the dispatch. Does not ask Jev. |
 
-The transport for the Codex workers works in every mode. Set the mode in the configuration file below, or for one session with `ORCH_MODE=shadow claude ...`.
+While Codex is on, the Codex workers can reach Codex in every mode. Set the mode in [the settings file](#configuration), or for one session with `ORCH_MODE=shadow claude ...`.
 
 ### Lines that a brief can carry
 
@@ -202,22 +318,25 @@ The transport for the Codex workers works in every mode. Set the mode in the con
 | `codex-effort: <none, minimal, low, medium, high, xhigh>` | The reasoning effort of Codex. |
 | `review-scope: uncommitted` | Review the uncommitted changes. This is the default for a direct call to the Codex reviewer. |
 | `review-scope: base:<branch>` or `commit:<hash>` | Review against a branch, or review one commit. |
-| `review-scope: custom` | Send the brief to Codex as review instructions, with no scope flag. |
-| `orch-route: keep` | The hook runs this call exactly as written: the same agent type and the same model. It works for every agent type. |
+| `review-scope: custom` | Send the brief to Codex as review instructions. Codex returns its whole answer. See [Codex reviews](REFERENCE.md#codex-reviews). |
+| `orch-route: keep` | The hook runs this call as written: the same agent type and the same model. It works for every agent type except `codex:codex-rescue`. |
 
-Codex refuses review instructions together with a scope flag. So a scoped review uses Codex's own review rules, and only a `custom` review reads the brief.
+A Codex line that is present but not valid, for example `review-scope: branch:main`, stops the task with `CODEX_FAILED`. It never falls back in silence, because Codex would then review a different diff than the one you asked for.
 
-When the hook moves a review from `subagent-router:reviewer` to Codex and the brief names no scope, the request gets the scope `custom`, so the brief travels as the review instructions and nothing of it is lost. Before this, such a review became a review of the uncommitted changes, which is an empty diff in a clean checkout. The dispatch record shows the scope in `review_scope`, and the request file says in `scope_source` whether the scope came from the brief, from the routing or from the default.
+**`orch-route: keep` is for a retry.** Jev sees only the brief. When a worker was blocked on a small model and the same brief starts again on a bigger one, Jev would pick the small model again. With this line, the retry stays on its model.
 
-A Codex line that is present but not valid, for example `review-scope: branch:main`, stops the task with `CODEX_FAILED`. It never falls back in silence, because Codex would then review another diff than the one you asked for.
-
-`orch-route: keep` is for a retry. Jev sees only the brief. When a worker was blocked on a small model and the same brief starts again on a bigger one, Jev would pick the small model again. With this line the retry stays on its model. Jev is still asked, so the log shows what the table would have picked. The line must stand on a line of its own. Any other value is ignored, and the log reports it in `brief_warnings`. The line does not stop the move of a Codex task to a Claude worker while Codex has no room, and it does not stop the writer lock. It does keep a model above Sonnet while Claude usage is high.
+- Jev is still asked, so the log shows what the table would have picked.
+- `orch-route: keep` must be the only text on its line. Any other value is ignored, and the log reports it in `brief_warnings`.
+- It does not stop three things: the redirect of `codex:codex-rescue`, the move of a Codex task to Claude while Codex cannot take work, and the writer lock.
+- It does keep a model above Sonnet while Claude is near its limit.
 
 ## Configuration
 
-There are two ways to set this up. Inside a session, `/subagent-router:configure` asks what you want and writes the file for you. It asks about the five things that matter, leaves the rest at their defaults, and checks the setup afterwards. A session that finds no settings file says so once and offers it.
+All settings live in one settings file, `~/.claude/orchestrator/config.json`. The file is optional: without it, every setting takes its default. There are three ways to change it.
 
-Outside a session, the same command reads and writes the file directly:
+**In a session.** `/subagent-router:configure` asks up to six questions and writes the settings file for you. It leaves the rest at their defaults and checks the setup afterwards. A session that finds no settings file says so once and offers this.
+
+**With the command,** from a clone of this repository. It reads and writes the settings file directly:
 
 ```bash
 node scripts/orch-config.mjs show                        # every setting, its value and where it comes from
@@ -226,9 +345,9 @@ node scripts/orch-config.mjs set codexEnabled=true       # several key=value pai
 node scripts/orch-config.mjs unset limitGate             # back to the default
 ```
 
-Every value is checked before anything is written, so one wrong value writes nothing at all, and a file that cannot be read is reported rather than overwritten. Keys the plugin does not know are left alone.
+The command checks every value before it writes anything. So one wrong value writes nothing at all. A settings file that cannot be read is reported, not overwritten. Keys that the plugin does not know are left alone.
 
-All settings live in one file, `~/.claude/orchestrator/config.json`. It is optional: without it every setting takes its default. You can also edit it by hand. Write only the keys you want to change.
+**By hand.** Write only the keys that you want to change:
 
 ```json
 {
@@ -238,201 +357,116 @@ All settings live in one file, `~/.claude/orchestrator/config.json`. It is optio
 }
 ```
 
+When the plugin reads the settings file, a value that is not valid falls back to its default, and an unknown key is ignored. Both are reported in the session start text, the log and the setup check. A mode that is not valid, or a settings file that cannot be read at all, gives the mode `shadow`. So a typing mistake never rewrites calls.
+
 ### Routing
 
 | Key | Default | Meaning |
 | :-- | :-- | :-- |
-| `mode` | `enforce` | `enforce` rewrites confident routes, `shadow` only logs what it would do, `off` asks Jev nothing. |
-| `kindGate` | `0.6` | The confidence Jev needs in the kind of task before the hook rewrites a call. |
-| `difficultyGate` | `0.5` | The confidence Jev needs in the difficulty before the difficulty counts. Below it, the task takes the normal route for its kind. |
+| `mode` | `enforce` | `enforce`, `shadow` or `off`. See [Modes](#modes). |
+| `kindGate` | `0.6` | The confidence that Jev needs in the kind of task before the hook rewrites a call. |
+| `difficultyGate` | `0.5` | The confidence that Jev needs in the difficulty before the difficulty counts. Below it, the task takes the normal route for its kind. |
 | `selfContainedGate` | `0.7` | How self-contained a brief must be before Codex gets the task. |
 | `routeOtherAgents` | `true` | Let the hook set the model of a call to an agent type that is not one of the plugin's workers. |
-| `keepModelAgents` | `[]` | Agent types whose model the hook never changes, by exact name, for example `["spec-compliance-reviewer"]`. |
+| `keepModelAgents` | `[]` | Agent types from outside the plugin whose model the hook never changes, by exact name, for example `["spec-compliance-reviewer"]`. Their briefs are not sent to Jev. Names of the plugin's own workers and `codex:codex-rescue` have no effect. |
 
 ### Usage limits
 
 | Key | Default | Meaning |
 | :-- | :-- | :-- |
-| `limitGate` | `80` | The percentage of the 5-hour or 7-day window from which the table prefers Codex. |
-| `pacing` | `true` | Also count a window as full when the usage so far, continued at the same speed, reaches 100 percent before the reset. |
-| `paceAfter` | `0.2` | How much of a window must pass before the pace rule counts, from 0 to 1. A projection from the first minutes is noise. |
-| `limitsMaxAgeMs` | `600000` | How long a usage sample stays usable, in milliseconds. Older samples are ignored and the limit rules stay off. |
+| `limitGate` | `80` | The usage percentage from which a plan counts as near its limit. For Claude, it applies to the 5-hour and the weekly window. The table then prefers Codex while Codex is not near its own limit, and caps routes at Sonnet when Codex cannot take work. For Codex, it applies to its saved plan usage. The table then keeps hard implementations and direct Codex implementer calls on Claude while Claude is not near its limit. |
+| `pacing` | `true` | Also count a window as near its limit when the usage so far, at the same speed, would reach 100 percent before the reset. |
+| `paceAfter` | `0.2` | How much of a window must pass before the pace rule counts, from 0 to 1. |
+| `limitsMaxAgeMs` | `600000` | How long a usage sample stays usable, in milliseconds. Older samples are ignored, and the limit rules stay off. |
 
 ### Answer completeness
 
 | Key | Default | Meaning |
 | :-- | :-- | :-- |
-| `completeRule` | `shadow` | What to do with a search that is only answered correctly by a complete list. `shadow` changes no route and records what it would have changed, `enforce` sends such a search to `complete-searcher` (Sonnet at effort `low`) instead of `searcher` on Haiku; for other agent types, such as `Explore`, it can change only the model, to Sonnet. `off` does neither. A call the orchestrator itself sends to `complete-searcher` stays there in every mode. |
+| `completeRule` | `shadow` | What to do with a search that is only answered correctly by a complete list: `shadow`, `enforce` or `off`. |
 | `completeGate` | `0.6` | How sure Jev must be that the answer needs every match before the rule counts, from 0 to 1. |
 
-### Codex
+The values of `completeRule`:
+
+- `shadow` changes no route. It records what it would have changed.
+- `enforce` sends such a search to `complete-searcher` (Sonnet at effort `low`) instead of `searcher` on Haiku. For other agent types, such as `Explore`, it can change only the model, to Sonnet.
+- `off` does neither.
+- A search that the main session itself sends to `complete-searcher` stays there, whatever the value.
+
+### Codex settings
 
 | Key | Default | Meaning |
 | :-- | :-- | :-- |
 | `codexEnabled` | `false` | Let the plugin use Codex at all. While this is off, no task reaches Codex in any mode. |
-| `codexSpendCredits` | `false` | Let a Codex job pay from bought credits once the weekly allowance is used up. |
-| `codexIncludeUserRules` | `true` | Send personal `CLAUDE.md`, recursive rules and allowed imports with implement and custom review briefs. |
-| `codexIncludeProjectRules` | `true` | Send project and parent instructions, local files, recursive rules and allowed imports with implement and custom review briefs. |
+| `codexSpendCredits` | `false` | Let a Codex job spend bought credits once a Codex plan window, the 5-hour or the weekly one, reaches 100 percent. It also lets the Codex runner start a job during the pause after a usage limit. See [Credits and pauses](REFERENCE.md#credits-and-pauses). |
+| `codexIncludeUserRules` | `true` | Send `~/.claude/CLAUDE.md`, the files under `~/.claude/rules/` and their allowed imports with implement, custom review and consult briefs. |
+| `codexIncludeProjectRules` | `true` | Send the `CLAUDE.md` files of the project and its parent folders, the `CLAUDE.local.md` files, the project rules and their allowed imports with implement, custom review and consult briefs. |
 
 ### Classifier and log
 
 | Key | Default | Meaning |
 | :-- | :-- | :-- |
 | `jevEnabled` | `false` | Let the hooks send briefs, and the verification part of worker answers, to Jev. The routing needs it. See [TypeSafe and Jev](#typesafe-and-jev). |
-| `jevModel` | `jev-latest` | The classifier version. Pin an exact version while measuring, so the routing cannot change under you. |
+| `jevModel` | `jev-latest` | The classifier version. Pin an exact version while you measure, so that a new Jev version cannot change the routing during the measurement. |
 | `jevUrl` | the TypeSafe endpoint | Where the classifier request goes. |
-| `jevTimeoutMs` | `5000` | How long to wait for an answer, from 100 to 8000. On a timeout the call runs as written. |
+| `jevTimeoutMs` | `5000` | How long to wait for an answer, from 100 to 8000. On a timeout, the call runs as written. |
 | `promptLogChars` | `20000` | How much of a brief the log keeps. `0` keeps briefs out of the log entirely. |
 | `resultLogChars` | `4000` | How much of a worker's answer the log keeps. |
 
-A value that is not valid falls back to its default, and an unknown key is ignored. Both are reported in the session start text, the log and the setup check. A mode that is not valid, or a file that cannot be read at all, gives the mode `shadow`, so a typing mistake never rewrites calls.
-
 ### Settings for one session
 
-These variables override the file for a single session, for example `ORCH_MODE=shadow claude ...`. They are meant for trying something out without editing the file.
+These variables override the settings file for a single session, for example `ORCH_MODE=shadow claude ...`. They let you try something out without editing the file.
 
 | Variable | Effect |
 | :-- | :-- |
 | `ORCH_MODE` | The mode: `enforce`, `shadow` or `off`. |
-| `ORCH_CODEX_ENABLED` | `1` or `0`. Turns Codex on or off, whatever the file says. |
-| `ORCH_JEV_ENABLED` | `1` or `0`. Turns Jev on or off, whatever the file says. |
+| `ORCH_CODEX_ENABLED` | `1` or `0`. Turns Codex on or off, whatever the settings file says. |
+| `ORCH_JEV_ENABLED` | `1` or `0`. Turns Jev on or off, whatever the settings file says. |
 | `ORCH_ROUTE_OTHER_AGENTS` | `1` or `0`. Whether the hook sets the model of other agent types. |
 | `ORCH_COMPLETE_RULE` | `shadow`, `enforce` or `off` for the completeness rule. |
 | `ORCH_JEV_TIMEOUT_MS` | The classifier timeout, in milliseconds. |
 | `ORCH_TYPESAFE_URL` | Another classifier endpoint. |
-| `ORCH_DATA_DIR` | Another folder for the log, the configuration and the usage samples. |
-| `ORCH_CODEX_WAIT_SECONDS` | How long a Codex worker waits for its job before reporting that it still runs, from 0 to 570. |
+| `ORCH_DATA_DIR` | Another folder for the log, the settings file and the usage samples. The status line snippet still writes to `~/.claude/orchestrator/`. Change `ORCH_DIR` in your copy of the snippet too, or the limit rules find no sample. |
+| `ORCH_CODEX_WAIT_SECONDS` | How long a Codex worker waits for its job before it reports that the job still runs, from 0 to 570. |
+| `ORCH_LOG_MAX_BYTES` | The size in bytes at which the dispatch log is rotated, 1024 or more. |
 
-A few more variables exist for the tests and the evaluation runner, so they can run without a network, a key or a real Codex. They are not needed in normal use.
+A few more variables exist for the tests and the evaluation runner, so they can run without a network, a key or a real Codex. You do not need them in normal use.
 
-The routing table is [scripts/lib/routing-table.mjs](scripts/lib/routing-table.mjs). The questions for Jev are in [scripts/lib/questions.mjs](scripts/lib/questions.mjs).
-
-## The log
-
-Everything is in `~/.claude/orchestrator/`. The log holds your briefs, so it stays outside the repository. The folder is created with mode 0700, and the files that hold briefs, results or dispatch records with mode 0600. A folder or a file from an older version with a wider mode is tightened on the next write. Set `promptLogChars: 0` in `config.json` to keep the text of briefs out of the log; the record then keeps the description and the routing facts. Nothing inside a brief is masked. Only the TypeSafe key is.
-
-| File | Content |
-| :-- | :-- |
-| `dispatch-log.jsonl` | One line per event: `session`, `dispatch`, `launched`, `start`, `stop`, `hook_error`. Every line carries `cwd`, the project folder of the session, so one log serves every project. At 25 MB the file is renamed to `dispatch-log.1.jsonl` and replaces the older one, so the log takes at most two files of that size. `ORCH_LOG_MAX_BYTES` changes the limit, in bytes, 1024 or more. |
-| `writers.jsonl` | A small index of who changed files: the plugin's writer workers, and every Claude `Edit`, `Write`, `MultiEdit` or `NotebookEdit` call, also from the main session. The cross-review rule reads it. A `PostToolUse` hook on these tools writes one short line per call. |
-| `codex-requests/` | The stored tasks for the Codex workers. Removed after 14 days. |
-| `codex-jobs/<id>/` | The brief, the events, the error output and the result of each Codex run. Removed after 14 days. |
-| `locks/` | One lock per checkout while a writer changes files there. For a Codex job it names the job and the process that started it, so it holds from the start on, before the runner has written its pid. For a Claude writer it names the session and, once the subagent has started, the subagent; it is given back when the subagent stops. |
-| `codex-limits.json` | The last limit numbers of Codex: percent used, reset time, credits balance. Saved after each Codex job. Numbers that may be older than the saved ones do not replace them. |
-| `notices/` | One empty file for each notice that a session has already shown, named by a hash of the session id. A file is created in one step that only one hook can win, so parallel dispatches show a notice once. Files older than 14 days are removed. A `notices.json` from a version before 2026-09-23 is no longer read and can be deleted. |
-| `codex-unavailable.json` | Written when a Codex job fails with a usage limit. Until the time in it, the routing sends no tasks to Codex, and the runner starts no Codex job unless `codexSpendCredits` is true. Delete the file to end the pause early. |
-| `limits-latest.json`, `limits.jsonl` | Written by the status line snippet: the two percentages, the two reset times (Unix epoch seconds) and the session whose status line saw them. `limits-latest.json` is the newest sample, and `limits.jsonl` has one line per change. |
-
-### The report
-
-```bash
-node scripts/orch-report.mjs
-```
-
-Inside a session the same report is `/subagent-router:report`. It reads the whole store (`dispatch-log.jsonl`, its rotated file and `limits.jsonl`) and prints counts only: no brief, no description and no worker result reaches the output. `--json` prints the same numbers as JSON, `--since 2026-09-22` keeps only records from that time on, and `--project <text>` keeps only sessions whose project folder contains the text. Records from before 2026-09-22 have no project folder, so a project filter drops them.
-
-What it prints, and what each number is for:
-
-- Dispatches per project, mode and action, and the share that the hook changed, by reason. This is the first number to read: when it is near zero, the plugin costs TypeSafe latency and money and saves nothing.
-- How often the orchestrator named a model in the call, and how often the hook ran another one, down or up, by pair (`opus->sonnet`), plus how often shadow mode would have done so. A move to or from a Codex worker is counted apart, because Haiku only runs the Codex wrapper and Codex does the task with its own model. Jev sees only the brief, and the orchestrator sees the whole conversation, so a high count downwards is the question to ask before trusting the table over the orchestrator.
-- Jev: how often it answered, its latency, the kinds, the share of answers at the kind gate and at the difficulty gate, and how often it agreed with the request, differed, or abstained.
-- Labels for a route that was too small, which the log gives for free: a retry of the same brief in the same session on a bigger model; a worker result whose verification text names a failure (a text match, because workers write the verification in their own words); a Codex job that failed. The other direction, a route that was bigger than needed, cannot come from the log; it needs the offline task set of the evaluation step.
-- Durations per worker from start to stop, and review findings by the family of the author, with the same author rule as the cross-review: a worker that failed or reported "Changed files: none" is not an author.
-- Claude usage over time from the status line log: the range of each window, how many windows were seen, and for each sample whether it was at the gate, tight by pace only, or calm.
-
-A `session` line is written at each session start, with `source` (`startup`, `resume`, `clear` or `compact`) and the configuration in force. A `dispatch` line has `claude` (whether Claude counted as tight, the reason `gate` or `pace`, and the projection of each window), `requested` (what the orchestrator asked for), `jev` (the answers, the model version and the time of the call), `route` (what the table said), `final` (what ran) and `action`: `rewrite`, `agree`, `pass`, `shadow`, `redirect`, `fallback` or `deny`. A `stop` line of a reviewer has `findings`, a count per priority.
-
-### The offline evaluation
-
-Executable checks are available for code-editing evaluations. Set `export: true` and add `verify: { "script": "../checks/check.mjs", "timeoutS": 30 }` to a task. The script path is relative to the task-set file. It must be outside the source tree named by `cwd`. Treat task sets and graders as trusted programs: never run a grader supplied by an issue or by the worker.
-
-The runner copies the single `.mjs` grader before starting the worker. Its only argument is the path of the finished code snapshot. Use Node built-in modules; sibling helper files are not copied. Exit 0 means pass; another exit code or a timeout means failure. The grader should assert the required behavior itself. If it runs candidate code, run that code in a child process and check the result in the trusted parent. Importing candidate code into the grader lets that code terminate or change the grader itself.
-
-These tasks require an empty output folder. Each trial exports the committed tree, leaving the source checkout untouched. On macOS, the entire worker runs under Seatbelt through `/usr/bin/sandbox-exec`. On Linux it needs a working bubblewrap installation at `/usr/bin/bwrap` or `/bin/bwrap`. The runner installs nothing. A missing or unusable boundary stops the run before the worker starts; it never falls back to an unrestricted process. Other operating systems cannot run executable evaluations yet.
-
-On Ubuntu 24.04, installing bubblewrap alone may not allow it to create namespaces. An administrator must also install `apparmor-profiles` and load its `bwrap-userns-restrict` profile. Check existing AppArmor profiles before adding another profile for the same executable. CI installs the supplied profile on its disposable runner and checks namespace startup before testing containment. See [Ubuntu's explanation of per-application namespace permissions](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces).
-
-The worker can write only its exported workspace, router data folder and private temporary folder. The copied grader, evidence folder and original grader file are hidden from its reads. Other reads and network remain available for the provider and project tools. This is not protection against all disclosure by an authenticated agent. The grader has no network, receives no inherited credentials and can write only its own temporary folder. It reads the protected snapshot, grader and runtime files. Snapshots reject links and special files, and stop above 100 MiB or 10,000 entries. Snapshot copying also runs inside a boundary so path races cannot read unrelated host files. Each exported task uses one pinned source revision across all arms and trials; records include `source_revision`.
-
-Run `npm run test:boundaries` on a host that supports the sandbox. It requires successful confinement and fails if the backend cannot start. CI runs it on macOS and Linux. The general test suite also checks refusal on hosts that cannot start a nested sandbox.
-
-The runner saves each trial's controls under `<output>/verification/grade-*/` and includes the evidence in `runs.jsonl`. Every worker is denied the entire verification root, including earlier and later trials, plus all original grader scripts in this task set. This does not hide other archived copies or git history elsewhere on the host. Evidence records the grader hash, code hash, command, exit code, duration, timeout and boundary backend. Grader output is represented by a hash, not saved verbatim, to avoid retaining secrets. Status is `passed`, `failed`, `stale` or `error`. A worker's claim that tests passed cannot replace this evidence. Hashes identify content; they are not signatures against someone who can edit the result files outside the worker.
-
-`--regrade` never executes the grader again. It checks the current workspace and grader against the saved hashes. Missing, changed or unavailable evidence cannot pass. Failed executable evaluations count as failures even when the worker crashes, unlike the older text-only grading. Keep the saved workspace to revalidate results. A changed grader needs a fresh trial. Executable failure makes a live evaluation exit 1. Regrading reports grade failures in its summary; its exit code 0 means the records were read successfully. Ordinary evaluations without `verify` keep their existing behavior and do not gain this OS boundary.
-
-Codex jobs also receive explicit command-line execution settings: reviews use `read-only`, implementations use `workspace-write`, approval escalation is disabled, command networking is disabled, and extra writable roots and shared temporary roots are removed. These settings rely on the installed Codex CLI's sandbox enforcement. They do not restrict the main Claude session or every external tool. Implementation checks that need network access or shared temporary writes now fail visibly instead of inheriting permissive user defaults.
-
-The log shows where the hook changed a route. It cannot show whether the other route would have been better, because only the chosen worker ran. For that question the same task must run several ways. The runner does that, grades each result and saves the numbers.
-
-```bash
-node scripts/orch-eval.mjs examples/eval-tasks.json --dry-run
-node scripts/orch-eval.mjs <task set.json> --arms off,sonnet,shadow,jev --runs 3 --max-total-usd 5
-```
-
-A task set is a JSON file with a `tasks` list. Each task has a `name`, a `prompt` and a `cwd` (the project folder), and may set `model` (the main session's model, default `sonnet`), `budgetUsd` (the cap of one run, default 1), `timeoutS` (default 600), `allowedTools` (default `Read`, `Glob`, `Grep`, `Agent`) and `export` (run in a fresh copy of the committed tree, for a task that writes files). The file may set the same fields as defaults for all its tasks. `examples/eval-tasks.json` is a sample.
-
-Alongside `verify`, two fields grade saved text and routing. `expect` holds `contains` and `notContains`, lists of strings that the answer must or must not hold. `expectRoute` holds `agent` and `model`, the expected route; only an arm in enforce mode is graded by it. A run passes when every applicable grader passes. Text-only tasks leave worker errors and timeouts ungraded. Executable tasks count them as failures.
-
-Text expectations can be changed and applied to saved records without another model call. Executable evidence is revalidated against the saved workspace and original grader; changing the executable grader requires a fresh trial:
-
-```bash
-node scripts/orch-eval.mjs <task set.json> --regrade ~/.claude/orchestrator/eval/<time>/
-```
-
-The arms: `off` is Claude Code without the plugin; `sonnet` is without the plugin with every subagent forced to Sonnet, the baseline to beat; `shadow` loads the plugin in shadow mode, so its workers and skills exist and the hook changes nothing; `jev` loads the plugin in enforce mode. Two more arms run only when `--arms` names them: `low` and `medium` run without the plugin, with the whole session at that effort (effort is how much the model thinks before it answers). They are the single-model baselines: Anthropic measured that one model at a lower effort often costs less than a setup with several models. The shell's `CLAUDE_CODE_EFFORT_LEVEL` and `CLAUDE_EFFORT` never reach an arm, so each arm runs at the effort it names, or at the model's default. Every run counts against the Claude plan, so the command prints the plan and the most it can spend before it starts, and `--dry-run` stops there. Each run gets its own data folder, so the real store stays clean, and the run has no usage sample, so the limit rule and the pace rule stay off. `--config <file>` gives the plugin arms a copy of a config file; without it the defaults apply, with Codex off. The `shadow` and `jev` arms turn Jev on for themselves, and they read the key from `TYPESAFE_API_KEY` in the shell that starts the runner.
-
-At the end the command applies the pass rule per task: the `jev` arm must cost less than the `sonnet` baseline at the same pass rate or better, and every route it took must be the expected one. The verdict is `NOT DECIDED` instead of a number when fewer than three scored runs per arm exist, when the two arms wrote very different amounts into the prompt cache (a factor above two), when no grader ran, or when the gap between the two arms is narrower than the uncertainty of that gap (twice its standard error). That last guard eases as runs are added, so paying for more runs buys a sharper answer. A wrong answer or a wrong route still fails at once, because those are not matters of degree. That is deliberate: a cost difference under those conditions is noise, not a result.
-
-When `low` or `medium` ran next to `jev`, the summary also sets `jev` against each of them, under the same guards. This is information, not part of the pass rule: it says whether a plain session at lower effort reaches the same pass rate for less than the routing does.
-
-The arms of a run start at a different arm each time, so no arm always runs on the coldest prompt cache. Read the column "cache new" before the cost: a run that wrote many tokens into the prompt cache costs more for that reason alone, whatever the route did. Use at least three runs per arm before you read a cost difference as a result.
-
-The results go to `~/.claude/orchestrator/eval/<time>/` (or `--out`): `runs.jsonl` with one line per run (cost, turns, durations, the models that ran, the number of refused tool calls, the dispatches of the plugin's hook with the model that then ran, and the answer cut to `--result-chars`), and `summary.json` with the counts per task and arm. The text summary prints counts only; no prompt and no answer reaches it. A failed or timed-out run also keeps the last 2,000 characters of its error output in `runs.jsonl`, not redacted, so treat that file as private output of the run. Exit code 1 means an error or a timeout in some run, 3 means `--max-total-usd` stopped the command.
-
-`model_only: true` marks a dispatch to another agent type that the table read. There the table can name only a model. A call to another agent type that the hook leaves alone has no such mark. Its `reason` is `keep_model_agent` when the agent type is on the keep list or is a fixed helper of Claude Code, and `other_agent_type` when `routeOtherAgents` is `false`. A brief with `orch-route: keep` gives the reason `keep_requested`.
-
-## Long Codex runs
-
-A Codex task can run longer than the 10-minute maximum of the Bash tool. So `scripts/orch-codex.mjs` starts Codex as a detached process and waits up to 9 minutes. If Codex needs longer, the command prints `STILL_RUNNING` and the exact `wait` command, and the worker runs that command until the result is there.
-
-```bash
-node scripts/orch-codex.mjs wait <job id>
-```
-
-```bash
-node scripts/orch-codex.mjs cancel <job id>
-```
-
-What happens when something goes wrong:
-
-- Codex runs in its own process group, with the commands that it starts. `cancel`, a timeout and the normal end all stop the whole group before the folder is free. A command that leaves the group on purpose (with `setsid`) is not covered.
-- `cancel` stops the runner and Codex, and reports success (`CODEX_CANCELLED <job id>`) only after both are gone. The job then ends with the exit code 143. A cancel is not a failure, so the report does not count it as a failed Codex job.
-- If `ps` cannot tell whether a process belongs to the job, `cancel` stops nothing and keeps the writer lock. It answers `CODEX_FAILED <job id> cancel_failed`. Run it again.
-- If the runner and Codex are both gone without an exit code, `wait` reports `CODEX_FAILED <job id> runner_died`, with the output of the runner from `runner.log`. The folder is free again.
-- If only the runner died, Codex may still change files. The job stays active, the folder stays locked, and `wait` names the `cancel` command.
-- A job that runs longer than 120 minutes is stopped with the exit code 124.
-- An error inside the runner after Codex has started, for example a file that cannot be written, stops Codex first. The exit code appears only when Codex has ended, and the folder stays locked until then.
-- A `run` that the writer lock refuses (`writer_busy`) gives the request back. The same `run` command works again once the other job has ended. When the lock cannot be read, the message names no job but the lock file; such a lock stops counting 15 minutes after it was written.
-- When Codex fails, the first line of the reason is what Codex itself reported, for example a used-up plan. Codex prints that as a JSON event, not as error output.
-- After 6 waits of 9 minutes, the worker hands the `STILL_RUNNING` text back to the main session.
+The files in the data folder are listed in [The data folder](REFERENCE.md#the-data-folder).
 
 ## Known limits
 
-- The writer lock covers Codex jobs and the plugin's Claude writers. It does not cover edits by the main session, or agent types of other owners: such an agent waits for a writer when Jev says that its task changes files, but it takes no lock itself.
-- A Claude writer's lock that no subagent has confirmed stops counting after 30 seconds, for a dispatch that was refused or never started. A confirmed lock counts until its subagent stops, its session ends, or one hour has passed. A writer that runs longer than one hour is not protected any more. When the lock is stuck, the denial names its file; remove it only when you are sure that no writer runs.
-- An agent type of another owner waits for a Codex writer only when Jev answered and said that its task changes files. When Jev is not asked (`routeOtherAgents` is false, or the type is on the keep list) or fails, the call runs.
-- The hook redirects `codex:codex-rescue` to `subagent-router:codex-implementer`. This closes one known way around the routing, not all of them. It also changes what `/codex:rescue` does. Use `ORCH_MODE=off` to get the old behaviour.
-- Codex reports zero tokens for a review run, so the log has no token count for reviews.
-- The hook learns the Codex limit numbers only after a Codex job that the plugin started. The numbers come from Codex's own session file, where Codex records each run. The format of that file is internal to Codex, not a public interface, so a Codex update can change it. A job that fails with a usage limit also pauses Codex until the time that Codex named. Between two jobs the numbers can be out of date. Then a job can still spend Codex credits, even when `codexSpendCredits` is `false`.
-- The routing table and the gates are first guesses. The log shows where Jev and the orchestrator disagree. It cannot show which route would have been better. That needs the same tasks with routing on and off.
-- For another agent type, Jev sees only the brief and never the agent file. It cannot know why an agent file names a model. Use `keepModelAgents` for an agent that must keep its model.
-- For another agent type, the hook does not read the agent file. So the log cannot tell whether a rewrite changed the model that would have run. When the agent file already names the model of the table, the log still says `rewrite`. In `shadow` mode the `launched` line shows the model that runs without a rewrite.
-- The upper limit of Sonnet covers only routes that the table picks, and only while Codex cannot take work. While Codex can take work, a hard task for another agent type still runs on Opus at a high Claude usage, because such a call cannot move to Codex.
+- **The writer lock has gaps.** It does not cover edits by the main session, and calls to other agent types take no lock. See [The writer lock](REFERENCE.md#the-writer-lock).
+- **The `codex:codex-rescue` redirect** blocks one known way to skip the routing, not all of them.
+- **Codex reports zero tokens for a scoped review,** so the log has no token count for those reviews. A custom review and a consult report their tokens.
+- **The Codex plan numbers can be old or missing.** The plugin learns them only after a Codex job that it started, from Codex's internal session files. A Codex update can change these files; see [Codex plan numbers](REFERENCE.md#codex-plan-numbers). When the plugin cannot read the numbers, the plan counts as unknown.
+- **So a job can spend credits although `codexSpendCredits` is `false`.** When the saved numbers are old, the plugin can miss that a Codex window has reached 100 percent.
+- **The routing table and the gates are first guesses.** A gate is the lowest confidence, or the usage level, at which a rule acts. The log shows where Jev and the main session disagree. It cannot show which route would have been better. That needs the same tasks with routing on and off; see [EVALUATION.md](EVALUATION.md).
+- **For another agent type, the hook does not read the agent file.** So the log cannot tell whether a rewrite changed the model that would have run. When the agent file already names the model of the table, the log still says `rewrite`. In `shadow` mode, the `launched` line shows the model that runs without a rewrite.
+- **The Sonnet cap is narrow.** It covers only the routes that the table picks, and only while Codex cannot take work. While Codex can take work, a hard task that does not move to Codex still runs on Opus when Claude is near its limit. Examples: a call to another agent type, a diagnosis that changes no files, and a hard implement or debug task whose brief is not self-contained.
 
-## Tests
+## More documentation
+
+- [REFERENCE.md](REFERENCE.md): how the routing decides, the writer lock, how Codex jobs run, the data folder and the report.
+- [EVALUATION.md](EVALUATION.md): the offline evaluation, which runs the same tasks with routing on and off to measure whether the routing saves money.
+- [CHANGELOG.md](CHANGELOG.md): what changed in each version.
+- [SECURITY.md](SECURITY.md): how to report a security problem.
+
+## Develop the plugin
+
+Clone the repository and load it for one session with a flag:
+
+```bash
+claude --plugin-dir /path/to/claude-subagent-router
+```
+
+- Do not use the flag in a project where the plugin is installed.
+- After a change to the plugin files, run `/reload-plugins` in the session, or start a new one.
 
 ```bash
 npm test
 ```
 
-The tests need no network and no key. They use a local stand-in for the TypeSafe API and a stand-in for the `codex` command. There are no npm dependencies.
+- The tests need no network and no key. They use a local stand-in for the TypeSafe API and a stand-in for the `codex` command.
+- `npm run check` checks the syntax of every script.
+- `npm run test:boundaries` checks the sandbox of the evaluation runner; see [EVALUATION.md](EVALUATION.md).

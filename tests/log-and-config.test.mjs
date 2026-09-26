@@ -1109,7 +1109,10 @@ test("the setup check says that Jev is off by default and does not look for a ke
   const tempDir = makeTempDir();
   try {
     const off = await runNode("scripts/setup-check.mjs", { env: cleanEnv(tempDir, { ORCH_CODEX_ENABLED: "", ORCH_JEV_ENABLED: "" }) });
-    assert.match(off.stdout, /OK\s+Jev: off, so the hook sends no brief to TypeSafe/);
+    assert.match(
+      off.stdout,
+      /OK\s+Jev: off, so the hook sends no brief to TypeSafe and picks no model\. The workers keep the models of their agent files\. To route with Jev, set "jevEnabled": true in config\.json and add a TypeSafe key\n/
+    );
     assert.doesNotMatch(off.stdout, /^\S+\s+TypeSafe key:/m);
     assert.match(off.stdout, /OK\s+Other agent types: they pass unchanged while Jev is off/);
     const on = await runNode("scripts/setup-check.mjs", { env: cleanEnv(tempDir, { ORCH_CODEX_ENABLED: "" }) });

@@ -64,7 +64,7 @@ if (config.codexEnabled && !codexPlatformSupported()) {
   if (!codex.available) {
     const planUsedUp = codex.reason === "codex_plan_used_up";
     const why = planUsedUp
-      ? `the saved Codex limit numbers show ${Math.round(codex.usedPercent)}% of the weekly allowance used, and codexSpendCredits is false`
+      ? `the saved Codex limit numbers show ${Math.round(codex.usedPercent)}% of a Codex plan window used, and codexSpendCredits is false`
       : "a Codex job failed with a usage limit";
     const routing = config.mode === "enforce" ? "the routing sends no tasks to Codex, and " : "";
     const runner = planUsedUp ? "the runner starts no Codex job" : "the runner starts no Codex job unless codexSpendCredits is true";
@@ -79,7 +79,7 @@ for (const name of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {
 
 const { key, source } = config.jevEnabled ? findApiKey() : { key: null, source: null };
 if (!config.jevEnabled) {
-  row("OK", "Jev", 'off, so the hook sends no brief to TypeSafe and changes no route. The workers keep the models of their agent files. To route with Jev, set "jevEnabled": true in config.json and add a TypeSafe key');
+  row("OK", "Jev", 'off, so the hook sends no brief to TypeSafe and picks no model. The workers keep the models of their agent files. To route with Jev, set "jevEnabled": true in config.json and add a TypeSafe key');
 } else if (!key) {
   // Claude Code passes the plugin option only to hooks, so this check cannot see
   // it. The hook records where it found the key, so the last routed call answers.

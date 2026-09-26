@@ -7,6 +7,8 @@
 //     "credits": { "has_credits": true, "balance": "57.76" } }
 // When `used_percent` reaches 100, Codex does not stop. It goes on and pays from
 // the credits balance. Credits are bought, so they are not part of the plan.
+// For `codex exec review`, the numbers are in the session file of a child
+// thread instead (see childSessionFiles()).
 //
 // The session file is an internal format of Codex, not a public interface. So
 // every read here is guarded, and "cannot read" always means "unknown".
@@ -43,38 +45,111 @@ function findRateLimits(value) {
   return null;
 }
 
-// Finds the session file of a thread. Codex sorts the files into year/month/day
-// folders, and the file name ends with the thread id.
-function sessionFileOfThread(threadId, env, now) {
-  if (!THREAD_ID_PATTERN.test(threadId ?? "")) {
-    return null;
-  }
-  // A job can run over midnight, so look at today and yesterday.
-  for (const dayOffset of [0, -1]) {
+// The folders that can hold the session files of a job. Codex sorts the files
+// into year/month/day folders. A job can run over midnight, so look at today
+// and yesterday.
+function dayFolders(env, now) {
+  return [0, -1].map((dayOffset) => {
     const day = new Date(now + dayOffset * 24 * 3600 * 1000);
-    const dir = path.join(sessionsDir(env), String(day.getFullYear()), String(day.getMonth() + 1).padStart(2, "0"), String(day.getDate()).padStart(2, "0"));
-    try {
-      const name = fs.readdirSync(dir).find((entry) => entry.endsWith(`${threadId}.jsonl`));
-      if (name) {
-        return path.join(dir, name);
-      }
-    } catch {
-      // No folder for that day.
+    return path.join(sessionsDir(env), String(day.getFullYear()), String(day.getMonth() + 1).padStart(2, "0"), String(day.getDate()).padStart(2, "0"));
+  });
+}
+
+function filesIn(dir) {
+  try {
+    return fs.readdirSync(dir);
+  } catch {
+    // No folder for that day.
+    return [];
+  }
+}
+
+// Finds the session file of a thread. The file name ends with the thread id.
+function sessionFileOfThread(threadId, env, now) {
+  for (const dir of dayFolders(env, now)) {
+    const name = filesIn(dir).find((entry) => entry.endsWith(`${threadId}.jsonl`));
+    if (name) {
+      return path.join(dir, name);
     }
   }
   return null;
 }
 
-// Reads the last limit numbers that Codex wrote for the plan limit of a thread.
-// Returns null when there are none.
-export function readLimitsOfThread(threadId, env = process.env, now = Date.now()) {
+// The first line of a session file is a `session_meta` record. It holds the
+// whole instructions of the thread, about 22 KB on codex-cli 0.154.0, while
+// the rest of the file can be megabytes. So only the start of the file is read.
+const FIRST_LINE_MAX_BYTES = 1024 * 1024;
+const READ_CHUNK_BYTES = 64 * 1024;
+
+// Returns the first line of a file, or null when it is longer than the limit.
+function firstLineOf(file) {
+  const fd = fs.openSync(file, "r");
   try {
-    const file = sessionFileOfThread(threadId, env, now);
-    if (!file) {
-      return null;
+    const chunks = [];
+    let position = 0;
+    while (position < FIRST_LINE_MAX_BYTES) {
+      const chunk = Buffer.alloc(READ_CHUNK_BYTES);
+      const read = fs.readSync(fd, chunk, 0, chunk.length, position);
+      const end = chunk.subarray(0, read).indexOf(0x0a);
+      if (end >= 0 || read === 0) {
+        chunks.push(chunk.subarray(0, end >= 0 ? end : read));
+        return Buffer.concat(chunks).toString("utf8");
+      }
+      chunks.push(chunk.subarray(0, read));
+      position += read;
     }
-    let last = null;
-    for (const line of fs.readFileSync(file, "utf8").split("\n")) {
+    return null;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// Finds the session files of the child threads of a thread, oldest first.
+// `codex exec review` (codex-cli 0.154.0) runs the review in a child thread,
+// and Codex writes the limit numbers only into the child's file, not into the
+// file of the thread that `--json` names. The child's file starts with a
+// `session_meta` record whose `payload.parent_thread_id` is the parent's id.
+// That field belongs to the same internal format, so a file that cannot be
+// read or parsed is skipped.
+function childSessionFiles(threadId, env, now) {
+  const children = [];
+  for (const dir of dayFolders(env, now)) {
+    for (const name of filesIn(dir)) {
+      if (!name.endsWith(".jsonl") || name.endsWith(`${threadId}.jsonl`)) {
+        continue;
+      }
+      try {
+        const line = firstLineOf(path.join(dir, name));
+        // A cheap test first: most files of a day belong to other threads.
+        if (!line?.includes(threadId)) {
+          continue;
+        }
+        const meta = JSON.parse(line);
+        if (meta?.type === "session_meta" && meta.payload?.parent_thread_id === threadId) {
+          children.push({ dir, name });
+        }
+      } catch {
+        // A file that went away, or a first line that is not complete JSON.
+      }
+    }
+  }
+  // The file name starts with the time the thread started, so this sorts by time,
+  // also across the two day folders.
+  children.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return children.map(({ dir, name }) => path.join(dir, name));
+}
+
+// The last `rate_limits` entry with a plan window in the files, or null.
+function lastLimitsIn(files) {
+  let last = null;
+  for (const file of files) {
+    let text;
+    try {
+      text = fs.readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n")) {
       if (!line.includes("rate_limits")) {
         continue;
       }
@@ -88,6 +163,21 @@ export function readLimitsOfThread(threadId, env = process.env, now = Date.now()
         // A line that is not complete JSON.
       }
     }
+  }
+  return last;
+}
+
+// Reads the last limit numbers that Codex wrote for the plan limit of a thread.
+// The thread's own file comes first. Only when it has no numbers are the files
+// of its child threads read (see childSessionFiles()). Returns null when there
+// are none.
+export function readLimitsOfThread(threadId, env = process.env, now = Date.now()) {
+  try {
+    if (!THREAD_ID_PATTERN.test(threadId ?? "")) {
+      return null;
+    }
+    const file = sessionFileOfThread(threadId, env, now);
+    const last = (file ? lastLimitsIn([file]) : null) ?? lastLimitsIn(childSessionFiles(threadId, env, now));
     if (!last) {
       return null;
     }

@@ -14,6 +14,9 @@
 //                         [--model M] [--effort E] [--wait S]
 //     With a scope flag, Codex reviews that diff with its own rules and does not see stdin.
 //     With --custom, Codex gets the text on stdin as its review instructions and no scope flag.
+//   orch-codex.mjs consult [--model M] [--effort E] [--wait S]
+//     Asks Codex a question that is not a code review, such as a design question.
+//     Codex reads the project in a read-only sandbox and takes no writer lock.
 //
 // A Codex task can run longer than the 10-minute maximum of the Bash tool.
 // So the job runs as a detached process, and this command only waits for it.
@@ -26,9 +29,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { claudeRules } from "./lib/claude-rules.mjs";
-import { RESULT_CONTRACT, UsageError, parseOptions, sendsBriefToCodex } from "./lib/codex-args.mjs";
+import { UsageError, briefContract, parseOptions, runsReadOnlyExec, sendsBriefToCodex } from "./lib/codex-args.mjs";
 import { isUsageLimitMessage } from "./lib/codex-availability.mjs";
-import { readEvents } from "./lib/codex-events.mjs";
+import { earlierLongMessages, readEvents } from "./lib/codex-events.mjs";
 import { readLimitsOfThread } from "./lib/codex-limits.mjs";
 import { REQUEST_ID_PATTERN, claimRequest, recordJobOfRequest, restoreRequest } from "./lib/codex-request.mjs";
 import { dataDir, loadConfig } from "./lib/config.mjs";
@@ -133,7 +136,8 @@ function startJob({ kind, model, effort, scope, brief, cwd }) {
     created_at: new Date().toISOString()
   };
   if (sendsBriefToCodex(job) && !job.has_brief) {
-    throw new UsageError(kind === "implement" ? "implement needs the task text" : "review --custom needs the review instructions");
+    const missing = { implement: "implement needs the task text", consult: "consult needs the question" };
+    throw new UsageError(missing[kind] ?? "review --custom needs the review instructions");
   }
   pruneOld();
 
@@ -154,7 +158,7 @@ function startJob({ kind, model, effort, scope, brief, cwd }) {
     if (sendsBriefToCodex(job)) {
       const rules = claudeRules(cwd, config);
       job.rules = rules.notes;
-      extras = `${kind === "implement" ? RESULT_CONTRACT : ""}${rules.text}`;
+      extras = `${briefContract(job)}${rules.text}`;
     }
     fs.writeFileSync(path.join(dir, "brief.md"), `${brief}${extras}`, { mode: 0o600 });
   }
@@ -217,12 +221,29 @@ function readJob(dir) {
   }
 }
 
-function describeScope(job) {
+function describeJob(job) {
+  if (job.kind === "consult") {
+    return " kind=consult";
+  }
   if (job.kind !== "review") {
     return "";
   }
   const scope = job.scope ?? { type: "uncommitted" };
   return ` scope=${scope.type}${scope.value ? `:${scope.value}` : ""}`;
+}
+
+// The answer of a read-only job, with any earlier agent message that may hold
+// the real answer. See earlierLongMessages() in codex-events.mjs.
+function fullAnswer(job, result, events) {
+  if (!runsReadOnlyExec(job)) {
+    return result;
+  }
+  const earlier = earlierLongMessages(events.messages, result);
+  if (earlier.length === 0) {
+    return result;
+  }
+  const label = "--- Codex wrote this earlier message, longer than its final message. It may hold the answer: ---";
+  return [result, ...earlier.map((text) => `\n${label}\n${text}`)].join("\n");
 }
 
 function readResult(dir) {
@@ -250,7 +271,7 @@ function printResult(dir) {
       limits && limits.usedPercent >= 100
         ? `Note for the user: the weekly Codex allowance is used up, so this run was paid from Codex credits. Balance now: ${limits.creditsBalance ?? "unknown"}.\n`
         : "";
-    process.stdout.write(`CODEX_JOB ${id} exit=0${describeScope(job)}${tokens}${used}\n${credits}${result}\n`);
+    process.stdout.write(`CODEX_JOB ${id} exit=0${describeJob(job)}${tokens}${used}\n${credits}${fullAnswer(job, result, events)}\n`);
     return 0;
   }
 
@@ -269,7 +290,7 @@ function printResult(dir) {
   if (errorOutput) {
     reasons.push(errorOutput);
   }
-  process.stdout.write(`CODEX_FAILED ${id} exit=${code}${describeScope(job)}\n${reasons.join("\n")}\nDetails: ${dir}\n`);
+  process.stdout.write(`CODEX_FAILED ${id} exit=${code}${describeJob(job)}\n${reasons.join("\n")}\nDetails: ${dir}\n`);
   return 1;
 }
 
@@ -496,13 +517,16 @@ async function main() {
   } else if (command === "cancel") {
     process.exitCode = await cancelJob(existingJobDir(options.positionals[0]));
     return;
-  } else if (command === "implement" || command === "review") {
+  } else if (command === "implement" || command === "review" || command === "consult") {
     if (options.positionals.length > 0) {
       throw new UsageError(`unexpected argument "${options.positionals[0]}". The task text comes from stdin.`);
     }
+    if (command === "consult" && options.scope) {
+      throw new UsageError("consult takes no review scope. Use review for a review of a diff.");
+    }
     dir = startJob({ kind: command, model: options.model, effort: options.effort, scope: options.scope, brief: readStdin(), cwd: process.cwd() });
   } else {
-    throw new UsageError("the command must be run, wait, cancel, implement or review");
+    throw new UsageError("the command must be run, wait, cancel, implement, review or consult");
   }
 
   const state = await waitForJob(dir, waitSeconds);

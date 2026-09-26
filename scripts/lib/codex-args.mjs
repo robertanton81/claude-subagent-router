@@ -17,6 +17,25 @@ export const RESULT_CONTRACT = [
   ""
 ].join("\n");
 
+// A custom review and a consult run as plain `codex exec`, and only the final
+// message of Codex comes back. So the brief says so, and a model that writes its
+// answer in an earlier message and ends with a short line is warned.
+const FINAL_MESSAGE_RULE =
+  "This task is read-only: do not change any file. Only your final message reaches the caller; earlier messages are lost. Put your whole answer in the final message, and do not point to an earlier message.";
+
+export const REVIEW_CONTRACT = [
+  "",
+  "---",
+  FINAL_MESSAGE_RULE,
+  "If the task above names an answer format, use it. Otherwise list the findings, the most severe first. Give each finding the file and line, what goes wrong and when, and a small fix. End with one line that says whether the change is correct.",
+  "In every format, tag each finding with its priority: [P0] must be fixed at once, [P1] before the merge, [P2] soon, [P3] minor. Say plainly when you found nothing.",
+  ""
+].join("\n");
+
+export const CONSULT_CONTRACT = ["", "---", FINAL_MESSAGE_RULE, ""].join("\n");
+
+export const JOB_KINDS = new Set(["implement", "review", "consult"]);
+
 export class UsageError extends Error {}
 
 // Reads the flags after the command word. Returns a plain options object.
@@ -100,13 +119,33 @@ function modelArgs(job) {
 // So a review has two forms. A scoped review names the diff, and Codex uses its
 // own review rules. A custom review sends the task text and no scope flag.
 export function sendsBriefToCodex(job) {
-  return job.kind === "implement" || (job.kind === "review" && job.scope?.type === "custom");
+  return job.kind === "implement" || job.kind === "consult" || (job.kind === "review" && job.scope?.type === "custom");
+}
+
+// A custom review and a consult run as plain `codex exec` in a read-only
+// sandbox, not as `codex exec review`. The review command runs the review in a
+// second Codex thread that must end with a JSON verdict (findings and a short
+// explanation). Only that verdict reaches the result file and the JSON events.
+// Text that does not fit the verdict is lost: a design answer of 19,470
+// characters came back as a verdict of 282 (codex-cli 0.154.0). The review
+// command also replaces an answer format that the brief asks for.
+export function runsReadOnlyExec(job) {
+  return job.kind === "consult" || (job.kind === "review" && job.scope?.type === "custom");
+}
+
+// The text that the runner adds to the brief of a job, after the task.
+export function briefContract(job) {
+  if (job.kind === "implement") {
+    return RESULT_CONTRACT;
+  }
+  if (job.kind === "consult") {
+    return CONSULT_CONTRACT;
+  }
+  return runsReadOnlyExec(job) ? REVIEW_CONTRACT : "";
 }
 
 function scopeArgs(scope) {
   switch (scope?.type) {
-    case "custom":
-      return [];
     case "base":
       return ["--base", scope.value];
     case "commit":
@@ -118,20 +157,17 @@ function scopeArgs(scope) {
 
 // The argument list for `codex`. When Codex gets the brief, it arrives on stdin ("-").
 export function buildCodexArgs(job, resultPath) {
-  // Command-line overrides win over a user's permissive defaults. The review
-  // has no write permission; implementation can write only its workspace.
-  const boundary = ["-c", 'approval_policy="never"', "-c", `sandbox_mode="${job.kind === "review" ? "read-only" : "workspace-write"}"`,
+  if (!JOB_KINDS.has(job.kind)) {
+    throw new UsageError(`unknown job kind ${job.kind}`);
+  }
+  // Command-line overrides win over a user's permissive defaults. Only an
+  // implement job may write, and only in its workspace. Every other kind reads.
+  const sandbox = job.kind === "implement" ? "workspace-write" : "read-only";
+  const boundary = ["-c", 'approval_policy="never"', "-c", `sandbox_mode="${sandbox}"`,
     "-c", "sandbox_workspace_write.network_access=false", "-c", "sandbox_workspace_write.writable_roots=[]",
     "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true"];
-  if (job.kind === "implement") {
-    return ["exec", "-s", "workspace-write", "--json", "-o", resultPath, ...modelArgs(job), ...boundary, "-"];
+  if (sendsBriefToCodex(job)) {
+    return ["exec", "-s", sandbox, "--json", "-o", resultPath, ...modelArgs(job), ...boundary, "-"];
   }
-  if (job.kind === "review") {
-    const args = ["exec", "review", ...scopeArgs(job.scope), "--json", "-o", resultPath, ...modelArgs(job), ...boundary];
-    if (sendsBriefToCodex(job)) {
-      args.push("-");
-    }
-    return args;
-  }
-  throw new UsageError(`unknown job kind ${job.kind}`);
+  return ["exec", "review", ...scopeArgs(job.scope), "--json", "-o", resultPath, ...modelArgs(job), ...boundary];
 }

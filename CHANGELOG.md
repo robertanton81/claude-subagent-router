@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.4
+
+Codex reviews and questions:
+
+- A custom review (`review --custom`, or a review that the hook moves to Codex) now returns Codex's whole answer. It runs as plain `codex exec` in the read-only sandbox, with the same limits as before. Before, it ran as `codex exec review`, which returns only a short JSON verdict, so an answer that was not a list of findings was lost, and the answer format of the brief was replaced.
+- The brief of a custom review asks for the whole answer in the final message, in the brief's own format, with each finding tagged `[P0]` to `[P3]`. When Codex still writes a long answer in an earlier message, the result shows that message too.
+- New command `orch-codex.mjs consult` for questions that are not code reviews, such as design questions. Codex answers in the read-only sandbox, so it changes no files, but it can read files outside the project. The command takes no writer lock.
+- Only implement jobs can get a sandbox that writes. A job kind that the code does not know is refused before Codex starts.
+- A scoped review (`review --uncommitted`, `--base` or `--commit`) now saves the Codex plan numbers, and its `CODEX_JOB` line shows `codex_used=`. `codex exec review` runs the review in a child thread, and Codex writes the numbers only into the session file of that thread. Before, the plugin read only the parent thread's file, so after a scoped review the plan counted as unknown, and a used-up plan could go unseen before the next job.
+
+Documentation:
+
+- **The README is rewritten for easier reading.** It is now a user guide: what the plugin does, install, setup, what leaves your machine, how it works, configuration and known limits. Each fact is stated once, long paragraphs are lists and tables, and each thing has one name. It is about 30 percent shorter.
+- **Two new files hold the details.** `REFERENCE.md` covers how the routing decides, the writer lock, the rules near a plan's limit, how Codex jobs run, the instruction snapshot, the data folder and the report. `EVALUATION.md` covers the offline evaluation.
+- **The documentation now matches the code.** Three rounds of checks against the code found 76 statements that were wrong, out of date or incomplete. Among them: the writer lock also covers the Claude writers; Jev also receives each call's description; reviews go to the other model family only while Jev is on, and at any usage; a direct call to a Codex worker moves to Claude only in `enforce` mode; work moves to Codex only while Codex is not near its own limit; `codexSpendCredits` covers the 5-hour window too; a pause without a readable time lasts one hour; the sample task set needs a `cwd` that exists before even `--dry-run` works; a task graded only by `expectRoute` never gets a verdict.
+- The README shows how to see why a subagent call was not rerouted, without printing any brief.
+- The setup check says "a Codex plan window" instead of "the weekly allowance", because either window counts, and it says that the hook "picks no model" while Jev is off. `orch-config explain` names consult briefs for the two rule switches and both Codex windows for `codexSpendCredits`.
+
 ## 0.3.3
 
 - Executable evaluation tasks can use a trusted external Node grader. The runner protects grading assets from worker writes, grades a separate code snapshot without network access, records independent evidence, and rejects stale evidence during regrading. Unsupported execution boundaries stop before a worker starts.

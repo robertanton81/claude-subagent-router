@@ -32,7 +32,7 @@ codex-effort: <none | minimal | low | medium | high | xhigh>
 review-scope: <uncommitted | base:<branch> | commit:<hash> | custom>
 ```
 
-Codex refuses review instructions together with a scope. With `uncommitted`, `base:` and `commit:`, Codex reviews that diff with its own rules and does not read the brief. With `custom`, Codex reads the brief as its instructions, so the brief must name what to review.
+Codex refuses review instructions together with a scope. With `uncommitted`, `base:` and `commit:`, Codex reviews that diff with its own rules and does not read the brief. With `custom`, Codex reads the brief as its instructions, so the brief must name what to review. Codex then returns its whole answer, in the answer format that the brief names, with each finding tagged `[P0]` to `[P3]`.
 
 A direct call to `subagent-router:codex-reviewer` without a scope line reviews the uncommitted changes, and the brief is not read. Write `review-scope:` when you mean something else. When the routing hook moves a review brief from `subagent-router:reviewer` to Codex, it uses `custom`, so the brief is not lost.
 

@@ -14,8 +14,9 @@ import { readLimitsOfThread, saveCodexLimits } from "./codex-limits.mjs";
 
 // Reads events.jsonl from the end. With --json, Codex reports its own errors as
 // events on stdout, for example a used-up plan, and not on stderr.
+// `messages` holds the text of every agent message, in the order of the stream.
 export function readEvents(dir) {
-  const found = { usage: null, error: null, threadId: null };
+  const found = { usage: null, error: null, threadId: null, messages: [] };
   let lines = [];
   try {
     lines = fs.readFileSync(path.join(dir, "events.jsonl"), "utf8").split("\n");
@@ -38,8 +39,30 @@ export function readEvents(dir) {
     if (!found.error && (event.type === "turn.failed" || event.type === "error")) {
       found.error = event.error?.message ?? event.message ?? null;
     }
+    if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
+      found.messages.push(event.item.text);
+    }
   }
+  found.messages.reverse();
   return found;
+}
+
+// A short note before the work ("I will read the diff first") is shorter than
+// this. An answer is not.
+const ANSWER_MIN_CHARS = 1000;
+
+// The agent messages before the final one that may hold the answer: each is
+// longer than the final message and long enough to be an answer. A model can
+// write its answer in an earlier message and end with a short line, and the
+// result file keeps only that last line. `codex exec --json` prints every agent
+// message, so the text is not lost.
+export function earlierLongMessages(messages, finalText) {
+  const final = finalText.trim();
+  const earlier = messages.map((text) => text.trim());
+  if (earlier.length > 0 && earlier[earlier.length - 1] === final) {
+    earlier.pop();
+  }
+  return earlier.filter((text) => text.length >= ANSWER_MIN_CHARS && text.length > final.length);
 }
 
 // True when the job ended well: exit code 0 and a final message.

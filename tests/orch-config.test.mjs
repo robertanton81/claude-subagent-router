@@ -291,6 +291,17 @@ test("explain describes one setting or all of them, and changes nothing", async 
       assert.ok(line, `explain left out ${key}`);
       assert.ok(line.includes(spec.about), `explain paired ${key} with the wrong description`);
     }
+    // The loop above compares each text with itself. These lines check what the
+    // texts say: the user switch names the personal files and the project switch
+    // the project files, both name every kind of brief that carries the snapshot,
+    // and the credit switch names both Codex windows.
+    const about = (key) => lines.find((entry) => entry.startsWith(key)) ?? "";
+    assert.match(about("codexIncludeUserRules"), /send personal Claude instructions/);
+    assert.match(about("codexIncludeProjectRules"), /send project and parent Claude instructions/);
+    for (const key of ["codexIncludeUserRules", "codexIncludeProjectRules"]) {
+      assert.match(about(key), /implement, custom review and consult briefs/, `${key} leaves out a kind of brief`);
+    }
+    assert.match(about("codexSpendCredits"), /the 5-hour or the weekly one/);
     const unknown = await runNode(COMMAND, { args: ["explain", "modus"], env });
     assert.equal(unknown.code, 2);
     assert.ok(!fs.existsSync(file), "explain writes nothing");

@@ -4,9 +4,10 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { buildCodexArgs, parseOptions, UsageError } from "../scripts/lib/codex-args.mjs";
+import { buildCodexArgs, CONSULT_CONTRACT, parseOptions, REVIEW_CONTRACT, UsageError } from "../scripts/lib/codex-args.mjs";
 import { codexUnavailableUntil, markCodexUnavailable } from "../scripts/lib/codex-availability.mjs";
-import { readCodexLimits, saveCodexLimits } from "../scripts/lib/codex-limits.mjs";
+import { earlierLongMessages } from "../scripts/lib/codex-events.mjs";
+import { readCodexLimits, readLimitsOfThread, saveCodexLimits } from "../scripts/lib/codex-limits.mjs";
 import { parseDirectives, writeRequest } from "../scripts/lib/codex-request.mjs";
 import { describeTime } from "../scripts/lib/provider-state.mjs";
 import { acquireWriterLock, jobsDir, writerLockPath } from "../scripts/lib/writer-lock.mjs";
@@ -88,9 +89,17 @@ test("buildCodexArgs builds the implement and the review command", () => {
   assert.deepEqual(buildCodexArgs({ kind: "review", scope: null, has_brief: true }, "/r.md"), [
     "exec", "review", "--uncommitted", "--json", "-o", "/r.md", ...reviewBoundary
   ]);
+  // A custom review and a consult run as plain `exec` in the read-only sandbox,
+  // because `exec review` returns only its JSON verdict.
   assert.deepEqual(buildCodexArgs({ kind: "review", scope: { type: "custom" }, has_brief: true }, "/r.md"), [
-    "exec", "review", "--json", "-o", "/r.md", ...reviewBoundary, "-"
+    "exec", "-s", "read-only", "--json", "-o", "/r.md", ...reviewBoundary, "-"
   ]);
+  assert.deepEqual(buildCodexArgs({ kind: "consult", scope: null, has_brief: true, effort: "high" }, "/r.md"), [
+    "exec", "-s", "read-only", "--json", "-o", "/r.md", "-c", "model_reasoning_effort=high", ...reviewBoundary, "-"
+  ]);
+  // A kind that the code does not know gets no command at all, so it can never
+  // fall through to a sandbox that can write.
+  assert.throws(() => buildCodexArgs({ kind: "ask", has_brief: true }, "/r.md"), UsageError);
 });
 
 test("parseDirectives accepts good lines and drops bad ones with a warning", () => {
@@ -359,6 +368,9 @@ test("only one Codex writer runs in a folder, and cancel frees the folder", asyn
     const review = await runNode(CLI, { args: ["review", "--wait", "0.5"], stdin: "", env, cwd: tempDir });
     assert.ok(review.stdout.startsWith("STILL_RUNNING"), review.stdout);
     await runNode(CLI, { args: ["cancel", jobIdOf(review.stdout)], env, cwd: tempDir });
+    // A consult only reads too, so it runs to its end next to the writer.
+    const consult = await runNode(CLI, { args: ["consult", "--wait", "20"], stdin: "Question", env: { ...env, FAKE_CODEX_DELAY_MS: "0" }, cwd: tempDir });
+    assert.match(consult.stdout, /^CODEX_JOB \S+ exit=0 kind=consult /, consult.stdout);
 
     const cancelled = await runNode(CLI, { args: ["cancel", id], env, cwd: tempDir });
     assert.ok(cancelled.stdout.startsWith(`CODEX_CANCELLED ${id}\n`), cancelled.stdout);
@@ -436,14 +448,110 @@ test("a scoped review never sends the task text, and a custom review does", asyn
     assert.ok(scoped.stdout.trimEnd().endsWith("STDIN="), "Codex must not get the text next to a scope flag");
 
     const custom = await runNode(CLI, { args: ["review", "--custom", "--wait", "20"], stdin: "Review src/a.js only.", env, cwd: tempDir });
-    assert.ok(custom.stdout.includes('"exec","review","--json"'), custom.stdout);
-    assert.ok(custom.stdout.includes("STDIN=Review src/a.js only."));
+    assert.ok(custom.stdout.includes('"exec","-s","read-only","--json"'), custom.stdout);
+    assert.ok(custom.stdout.includes(`STDIN=Review src/a.js only.${REVIEW_CONTRACT}`), "the review contract follows the task");
     assert.ok(!custom.stdout.includes("Changed files:"), "a review gets no result contract");
 
     const customWithoutText = await runNode(CLI, { args: ["review", "--custom"], stdin: "", env, cwd: tempDir });
     assert.equal(customWithoutText.code, 2);
     assert.match(customWithoutText.stdout, /needs the review instructions/);
   });
+});
+
+test("consult sends the question with its own contract to a read-only Codex", async () => {
+  await withSetup({}, async ({ tempDir, env }) => {
+    const consult = await runNode(CLI, { args: ["consult", "--wait", "20"], stdin: "Which store fits here?", env, cwd: tempDir });
+    assert.equal(consult.code, 0, consult.stdout);
+    assert.match(consult.stdout, /^CODEX_JOB \S+ exit=0 kind=consult /);
+    assert.ok(consult.stdout.includes('"exec","-s","read-only","--json"'), consult.stdout);
+    assert.ok(consult.stdout.includes('"sandbox_mode=\\"read-only\\""'), consult.stdout);
+    assert.ok(consult.stdout.includes(`STDIN=Which store fits here?${CONSULT_CONTRACT}`), consult.stdout);
+    assert.ok(!consult.stdout.includes("[P0]"), "a consult gets no review format");
+    assert.ok(!consult.stdout.includes("Changed files:"), "a consult gets no result contract");
+
+    const withoutText = await runNode(CLI, { args: ["consult"], stdin: "", env, cwd: tempDir });
+    assert.equal(withoutText.code, 2);
+    assert.match(withoutText.stdout, /consult needs the question/);
+
+    const withScope = await runNode(CLI, { args: ["consult", "--base", "main"], stdin: "Question", env, cwd: tempDir });
+    assert.equal(withScope.code, 2);
+    assert.match(withScope.stdout, /consult takes no review scope/);
+  });
+});
+
+// A stand-in that behaves like codex-cli 0.154.0. `exec review` runs the review
+// in a second thread that must end with a JSON verdict. Only the verdict reaches
+// the result file and the JSON events; the long answer stays in the second
+// thread, here a file next to the stand-in. Plain `exec` prints every agent
+// message as an event and writes the last one to the result file.
+// FAKE_CODEX_SPLIT=long ends with a short line after the answer; =short sends a
+// short preamble before a short answer.
+const LONG_ANSWER = `LONG ANSWER START ${"design detail ".repeat(400)}LONG ANSWER END`;
+const FAKE_CODEX_REVIEW_MODE = `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+if (args[0] === "login") { process.stderr.write("Logged in using ChatGPT\\n"); process.exit(0); }
+const resultFile = args[args.indexOf("-o") + 1];
+const answer = ${JSON.stringify(LONG_ANSWER)};
+const say = (text) => process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }) + "\\n");
+let messages = [answer];
+if (args[1] === "review") {
+  fs.writeFileSync(path.join(__dirname, "review-thread.txt"), answer);
+  messages = ["No patch was supplied or reviewed; the design answer above recommends a supervisor."];
+} else if (process.env.FAKE_CODEX_SPLIT === "long") {
+  messages = ["I will read the code first.", answer, "Done. The answer is above."];
+} else if (process.env.FAKE_CODEX_SPLIT === "short") {
+  messages = ["I will read the code first, then the decisions.", "No blocking findings."];
+}
+messages.forEach(say);
+fs.writeFileSync(resultFile, messages[messages.length - 1]);
+`;
+
+test("a custom review and a consult return the whole answer, not only a review verdict", async () => {
+  await withSetup({}, async ({ tempDir, env }) => {
+    fs.writeFileSync(env.ORCH_CODEX_BIN, FAKE_CODEX_REVIEW_MODE, { mode: 0o755 });
+    for (const [args, header] of [[["review", "--custom"], "scope=custom"], [["consult"], "kind=consult"]]) {
+      const result = await runNode(CLI, { args: [...args, "--wait", "20"], stdin: "Is this design sound?", env, cwd: tempDir });
+      assert.match(result.stdout, new RegExp(`^CODEX_JOB \\S+ exit=0 ${header}\\n`), result.stdout);
+      assert.ok(result.stdout.includes(LONG_ANSWER), `${args[0]}: the whole answer must come back:\n${result.stdout.slice(0, 300)}`);
+      assert.ok(!result.stdout.includes("No patch was supplied"), `${args[0]}: the answer is not the review verdict`);
+      assert.ok(!result.stdout.includes("It may hold the answer"), `${args[0]}: a single message is not repeated`);
+    }
+  });
+});
+
+test("an answer in an earlier Codex message is returned next to a short final message", async () => {
+  await withSetup({}, async ({ tempDir, env }) => {
+    fs.writeFileSync(env.ORCH_CODEX_BIN, FAKE_CODEX_REVIEW_MODE, { mode: 0o755 });
+    const split = { ...env, FAKE_CODEX_SPLIT: "long" };
+    for (const args of [["consult"], ["review", "--custom"]]) {
+      const result = await runNode(CLI, { args: [...args, "--wait", "20"], stdin: "Question", env: split, cwd: tempDir });
+      const lines = result.stdout.split("\n");
+      assert.equal(lines[1], "Done. The answer is above.", "the final message comes first");
+      assert.ok(result.stdout.includes(`It may hold the answer: ---\n${LONG_ANSWER}\n`), `${args[0]}: ${result.stdout.slice(0, 300)}`);
+      assert.ok(!result.stdout.includes("I will read the code first."), "a short preamble is not repeated");
+    }
+
+    // An implement result is read line by line ("Changed files:"), so nothing is added to it.
+    const implement = await runNode(CLI, { args: ["implement", "--wait", "20"], stdin: "Goal: x", env: split, cwd: tempDir });
+    assert.equal(implement.stdout.split("\n").slice(1).join("\n"), "Done. The answer is above.\n");
+
+    // A preamble that is longer than a short final answer, but too short to be an answer, is not repeated.
+    const short = await runNode(CLI, { args: ["consult", "--wait", "20"], stdin: "Question", env: { ...env, FAKE_CODEX_SPLIT: "short" }, cwd: tempDir });
+    assert.equal(short.stdout.split("\n").slice(1).join("\n"), "No blocking findings.\n");
+  });
+});
+
+test("earlierLongMessages keeps only earlier messages that can hold an answer", () => {
+  const long = "a".repeat(1200);
+  assert.deepEqual(earlierLongMessages(["note", long, "short end"], "short end"), [long]);
+  // The final message is not repeated, also with other white space around it.
+  assert.deepEqual(earlierLongMessages([long], `${long}\n`), []);
+  // An earlier message shorter than the final one is a preamble, whatever its length.
+  assert.deepEqual(earlierLongMessages(["b".repeat(1500), "c".repeat(2000)], "c".repeat(2000)), []);
+  // When the events miss the final message, every earlier message is compared.
+  assert.deepEqual(earlierLongMessages([long], "short end"), [long]);
 });
 
 test("zero token counts are left out of the header", async () => {
@@ -566,7 +674,10 @@ test("a stored request with a wrong line or a missing folder starts nothing", as
 
 // A stand-in that also writes a Codex session file with limit numbers.
 // `windows` replaces the plan windows, for plans with a 5-hour and a weekly window.
-function fakeCodexWithLimits(usedPercent, balance, windows = null) {
+// With `inChildThread`, it writes the numbers the way `codex exec review` does
+// (codex-cli 0.154.0): not into the file of the thread that `--json` names, but
+// into the file of a child thread whose first line names that thread as its parent.
+function fakeCodexWithLimits(usedPercent, balance, windows = null, { inChildThread = false } = {}) {
   return `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
@@ -577,7 +688,18 @@ const now = new Date();
 const dir = path.join(process.env.CODEX_HOME, "sessions", String(now.getFullYear()), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0"));
 fs.mkdirSync(dir, { recursive: true });
 const limits = { limit_id: "codex", primary: { used_percent: ${usedPercent}, window_minutes: 10080, resets_at: Math.floor(Date.now() / 1000) + 3600 }, ...${windows ?? "{}"}, credits: { has_credits: true, balance: "${balance}" } };
-fs.writeFileSync(path.join(dir, "rollout-2026-01-01T00-00-00-" + threadId + ".jsonl"), JSON.stringify({ type: "event_msg", payload: { type: "token_count", rate_limits: limits } }) + "\\n");
+const limitsLine = JSON.stringify({ type: "event_msg", payload: { type: "token_count", rate_limits: limits } }) + "\\n";
+if (${inChildThread}) {
+  const childId = "01a0c3bc-fad1-7000-8000-00000000c41d";
+  // A real parent file had the word only inside a message text.
+  fs.writeFileSync(path.join(dir, "rollout-2026-01-01T00-00-00-" + threadId + ".jsonl"),
+    JSON.stringify({ type: "session_meta", payload: { id: threadId, source: "exec" } }) + "\\n" +
+    JSON.stringify({ type: "event_msg", payload: { type: "item_completed", item: { text: "the rate_limits field" } } }) + "\\n");
+  fs.writeFileSync(path.join(dir, "rollout-2026-01-01T00-00-01-" + childId + ".jsonl"),
+    JSON.stringify({ type: "session_meta", payload: { id: childId, parent_thread_id: threadId, source: { subagent: "review" } } }) + "\\n" + limitsLine);
+} else {
+  fs.writeFileSync(path.join(dir, "rollout-2026-01-01T00-00-00-" + threadId + ".jsonl"), limitsLine);
+}
 process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: threadId }) + "\\n");
 fs.writeFileSync(args[args.indexOf("-o") + 1], "done");
 `;
@@ -667,6 +789,87 @@ test("a used-up weekly window stops the next job, also when the 5-hour window ha
     const refused = await runNode(CLI, { args: ["implement", "--wait", "20"], stdin: "Goal: x", env: withHome, cwd: tempDir });
     assert.match(refused.stdout, /^CODEX_FAILED \S+ exit=75\n/);
   });
+});
+
+test("a scoped review shows and saves the Codex numbers of its review thread", async () => {
+  await withSetup({}, async ({ tempDir, env }) => {
+    const withHome = { ...env, CODEX_HOME: path.join(tempDir, "codex-home") };
+    fs.writeFileSync(env.ORCH_CODEX_BIN, fakeCodexWithLimits(42, "500.0", null, { inChildThread: true }), { mode: 0o755 });
+    const review = await runNode(CLI, { args: ["review", "--wait", "20"], stdin: "", env: withHome, cwd: tempDir });
+    assert.match(review.stdout, /^CODEX_JOB \S+ exit=0 scope=uncommitted codex_used=42%\ndone/, review.stdout);
+    assert.equal(readCodexLimits({ ORCH_DATA_DIR: env.ORCH_DATA_DIR })?.usedPercent, 42, "the runner saved the numbers of the child thread");
+  });
+});
+
+// Writes a Codex session file into the day folder of `date`, one record per line.
+function writeSessionFile(codexHome, date, name, records) {
+  const dir = path.join(codexHome, "sessions", String(date.getFullYear()), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0"));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, name), records.map((record) => (typeof record === "string" ? record : JSON.stringify(record))).join("\n") + "\n");
+}
+
+test("the numbers come from a child thread only when the thread's own file has none", () => {
+  const tempDir = makeTempDir();
+  const env = { CODEX_HOME: path.join(tempDir, "codex-home") };
+  // Noon local time, because Codex names the day folders by local time.
+  const today = new Date(2026, 8, 26, 12, 0, 0);
+  const yesterday = new Date(2026, 8, 25, 12, 0, 0);
+  const now = today.getTime();
+  const numbers = (usedPercent) => ({
+    type: "event_msg",
+    payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: usedPercent, window_minutes: 10080, resets_at: now / 1000 + 3600 } } }
+  });
+  const meta = (id, parent, extra = {}) => ({ type: "session_meta", payload: { id, ...(parent ? { parent_thread_id: parent, source: { subagent: "review" } } : { source: "exec" }), ...extra } });
+  const review = "0000000a-0000-7000-8000-00000000000a";
+  const other = "0000000b-0000-7000-8000-00000000000b";
+  try {
+    // A scoped review: the parent's file names the field only inside a message,
+    // and its review child holds the numbers.
+    writeSessionFile(env.CODEX_HOME, today, `rollout-2026-09-26T11-00-00-${review}.jsonl`, [
+      meta(review),
+      { type: "event_msg", payload: { type: "item_completed", item: { text: "the rate_limits field" } } }
+    ]);
+    writeSessionFile(env.CODEX_HOME, today, "rollout-2026-09-26T11-00-01-0000000c-0000-7000-8000-00000000000c.jsonl", [
+      meta("0000000c-0000-7000-8000-00000000000c", review),
+      numbers(40),
+      numbers(42)
+    ]);
+    // Later files that are not its children: one names the review only in its
+    // instructions, one has a first line that is not JSON.
+    writeSessionFile(env.CODEX_HOME, today, "rollout-2026-09-26T11-30-00-0000000d-0000-7000-8000-00000000000d.jsonl", [
+      meta("0000000d-0000-7000-8000-00000000000d", other, { base_instructions: `Look at thread ${review}.` }),
+      numbers(100)
+    ]);
+    writeSessionFile(env.CODEX_HOME, today, "rollout-2026-09-26T11-31-00-0000000e-0000-7000-8000-00000000000e.jsonl", [`{"type":"session_meta","payload":{"parent_thread_id":"${review}"`, numbers(99)]);
+    assert.equal(readLimitsOfThread(review, env, now)?.usedPercent, 42, "the last numbers of the review child");
+    assert.equal(readLimitsOfThread(other, env, now)?.usedPercent, 100, "the numbers of the other thread's child");
+    assert.equal(readLimitsOfThread("0000000f-0000-7000-8000-00000000000f", env, now), null, "a thread with no file and no child");
+
+    // A thread whose own file has numbers: its child's numbers are not read.
+    const plain = "00000010-0000-7000-8000-000000000010";
+    writeSessionFile(env.CODEX_HOME, today, `rollout-2026-09-26T11-40-00-${plain}.jsonl`, [meta(plain), numbers(10)]);
+    writeSessionFile(env.CODEX_HOME, today, "rollout-2026-09-26T11-40-01-00000011-0000-7000-8000-000000000011.jsonl", [
+      meta("00000011-0000-7000-8000-000000000011", plain),
+      numbers(90)
+    ]);
+    assert.equal(readLimitsOfThread(plain, env, now)?.usedPercent, 10, "the thread's own numbers come first");
+
+    // A review that started before midnight: its children are in two day folders,
+    // and the later child holds the later numbers.
+    const late = "00000012-0000-7000-8000-000000000012";
+    writeSessionFile(env.CODEX_HOME, yesterday, `rollout-2026-09-25T23-59-58-${late}.jsonl`, [meta(late)]);
+    writeSessionFile(env.CODEX_HOME, yesterday, "rollout-2026-09-25T23-59-59-00000013-0000-7000-8000-000000000013.jsonl", [
+      meta("00000013-0000-7000-8000-000000000013", late),
+      numbers(50)
+    ]);
+    writeSessionFile(env.CODEX_HOME, today, "rollout-2026-09-26T00-00-01-00000014-0000-7000-8000-000000000014.jsonl", [
+      meta("00000014-0000-7000-8000-000000000014", late),
+      numbers(55)
+    ]);
+    assert.equal(readLimitsOfThread(late, env, now)?.usedPercent, 55, "the child that started last wins, across the two folders");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 const HOUR_MS = 3600 * 1000;
@@ -826,7 +1029,7 @@ test("the setup check reports a used-up Codex plan from either signal", async ()
     const resetsAt = Date.now() + 2 * 24 * 3600 * 1000;
     fs.mkdirSync(env.ORCH_DATA_DIR, { recursive: true });
     fs.writeFileSync(path.join(env.ORCH_DATA_DIR, "codex-limits.json"), JSON.stringify({ usedPercent: 100, resetsAt, creditsBalance: 0, ts: Date.now() }));
-    const usedUp = `WARN    Codex capacity: the saved Codex limit numbers show 100% of the weekly allowance used, and codexSpendCredits is false. Until ${describeTime(resetsAt)}`;
+    const usedUp = `WARN    Codex capacity: the saved Codex limit numbers show 100% of a Codex plan window used, and codexSpendCredits is false. Until ${describeTime(resetsAt)}`;
     assert.equal(await capacityRow(), `${usedUp}, the routing sends no tasks to Codex, and the runner starts no Codex job`);
     // Only enforce mode moves tasks. The runner checks in every mode.
     assert.equal(await capacityRow({ ORCH_MODE: "shadow" }), `${usedUp}, the runner starts no Codex job`);

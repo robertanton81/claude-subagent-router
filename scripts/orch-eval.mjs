@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Runs the tasks of a task set in several arms through `claude -p` and saves
 // the numbers of every run: cost, turns, duration, the models that ran, and
-// the dispatches that the plugin's hook logged. It grades nothing; see
-// scripts/lib/eval.mjs.
+// the dispatches that the plugin's hook logged, and independent executable
+// evidence when a task names a trusted grader.
 //
 //   node scripts/orch-eval.mjs <task set.json> [--arms off,sonnet,shadow,jev] [--runs 1]
 //        [--max-total-usd 5] [--config <file>] [--out <folder>] [--result-chars 4000] [--dry-run]
@@ -22,9 +22,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { execFileSync } from "node:child_process";
 
 import { dataDir } from "./lib/config.mjs";
 import { ensurePrivateDir, makeFilePrivate } from "./lib/log.mjs";
+import { boundWorker, prepareVerification, verifyWorkspace } from "./lib/executable-grade.mjs";
 import {
   ARMS,
   DEFAULT_ARMS,
@@ -172,8 +174,15 @@ async function main() {
   // The records hold the answers the runs produced, and the error output of a
   // run that failed. They are kept as privately as the plugin's own store.
   ensurePrivateDir(outDir);
+  if (taskSet.tasks.some((task) => task.verify) && fs.readdirSync(outDir).length > 0) {
+    throw new Error("executable evaluations require a new empty output folder; saved evidence must not be overwritten");
+  }
   const runsFile = path.join(outDir, "runs.jsonl");
   const records = [];
+  // Pin once, before any worker starts. A concurrent source commit must not
+  // give later arms a different starting tree.
+  const revisions = new Map(taskSet.tasks.filter((task) => task.export).map((task) =>
+    [task.name, execFileSync("git", ["-C", task.cwd, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()]));
   let spent = 0;
   let stoppedByCap = false;
 
@@ -189,12 +198,19 @@ async function main() {
         prepareDataDir(runData, values.config ?? null);
         let cwd = task.cwd;
         if (task.export) {
-          cwd = exportWorkspace(task.cwd, path.join(runDir, "workspace"));
+          cwd = exportWorkspace(task.cwd, path.join(runDir, "workspace"), revisions.get(task.name));
         }
+        if (task.verify) cwd = fs.realpathSync(cwd);
         const invocation = buildInvocation(task, arm, { claudeBin, pluginDir: ROOT, dataDir: runData, cwd });
+        const verification = task.verify ? prepareVerification(task, runDir, cwd, runData, {
+          protectedRoot: path.join(outDir, "verification"), protectedScripts: taskSet.tasks.filter((item) => item.verify).map((item) => item.verify.script)
+        }) : null;
+        const execution = verification ? boundWorker(invocation, verification) : invocation;
         process.stderr.write(`${task.name} / ${arm} / run ${run}: started\n`);
-        const outcome = await runOne(invocation, { timeoutMs: task.timeoutS * 1000 });
+        const outcome = await runOne(execution, { timeoutMs: task.timeoutS * 1000 });
         const record = makeRecord({ task, arm, run, invocation, outcome, dataDir: runData, resultChars });
+        if (revisions.has(task.name)) record.source_revision = revisions.get(task.name);
+        if (verification) record.verification = await verifyWorkspace(task, cwd, verification, runOne);
         records.push(record);
         fs.appendFileSync(runsFile, `${JSON.stringify(record)}\n`, { mode: 0o600 });
         makeFilePrivate(runsFile);
@@ -216,7 +232,7 @@ async function main() {
   if (stoppedByCap) {
     process.stderr.write(`orch-eval: stopped by --max-total-usd after $${spent.toFixed(3)}; the runs so far are saved\n`);
     process.exitCode = 3;
-  } else if (summary.errors > 0 || summary.timeouts > 0) {
+  } else if (summary.errors > 0 || summary.timeouts > 0 || records.some((record) => record.verification && record.verification.status !== "passed")) {
     process.exitCode = 1;
   }
 }

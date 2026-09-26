@@ -344,7 +344,25 @@ A `session` line is written at each session start, with `source` (`startup`, `re
 
 ### The offline evaluation
 
-The log shows where the hook changed a route. It cannot show whether the other route would have been better, because only the chosen worker ran. For that question the same task must run several ways. The runner does that and saves the numbers; it grades nothing yet.
+Executable checks are available for code-editing evaluations. Set `export: true` and add `verify: { "script": "../checks/check.mjs", "timeoutS": 30 }` to a task. The script path is relative to the task-set file. It must be outside the source tree named by `cwd`. Treat task sets and graders as trusted programs: never run a grader supplied by an issue or by the worker.
+
+The runner copies the single `.mjs` grader before starting the worker. Its only argument is the path of the finished code snapshot. Use Node built-in modules; sibling helper files are not copied. Exit 0 means pass; another exit code or a timeout means failure. The grader should assert the required behavior itself. If it runs candidate code, run that code in a child process and check the result in the trusted parent. Importing candidate code into the grader lets that code terminate or change the grader itself.
+
+These tasks require an empty output folder. Each trial exports the committed tree, leaving the source checkout untouched. On macOS, the entire worker runs under Seatbelt through `/usr/bin/sandbox-exec`. On Linux it needs a working bubblewrap installation at `/usr/bin/bwrap` or `/bin/bwrap`. The runner installs nothing. A missing or unusable boundary stops the run before the worker starts; it never falls back to an unrestricted process. Other operating systems cannot run executable evaluations yet.
+
+On Ubuntu 24.04, installing bubblewrap alone may not allow it to create namespaces. An administrator must also install `apparmor-profiles` and load its `bwrap-userns-restrict` profile. Check existing AppArmor profiles before adding another profile for the same executable. CI installs the supplied profile on its disposable runner and checks namespace startup before testing containment. See [Ubuntu's explanation of per-application namespace permissions](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces).
+
+The worker can write only its exported workspace, router data folder and private temporary folder. The copied grader, evidence folder and original grader file are hidden from its reads. Other reads and network remain available for the provider and project tools. This is not protection against all disclosure by an authenticated agent. The grader has no network, receives no inherited credentials and can write only its own temporary folder. It reads the protected snapshot, grader and runtime files. Snapshots reject links and special files, and stop above 100 MiB or 10,000 entries. Snapshot copying also runs inside a boundary so path races cannot read unrelated host files. Each exported task uses one pinned source revision across all arms and trials; records include `source_revision`.
+
+Run `npm run test:boundaries` on a host that supports the sandbox. It requires successful confinement and fails if the backend cannot start. CI runs it on macOS and Linux. The general test suite also checks refusal on hosts that cannot start a nested sandbox.
+
+The runner saves each trial's controls under `<output>/verification/grade-*/` and includes the evidence in `runs.jsonl`. Every worker is denied the entire verification root, including earlier and later trials, plus all original grader scripts in this task set. This does not hide other archived copies or git history elsewhere on the host. Evidence records the grader hash, code hash, command, exit code, duration, timeout and boundary backend. Grader output is represented by a hash, not saved verbatim, to avoid retaining secrets. Status is `passed`, `failed`, `stale` or `error`. A worker's claim that tests passed cannot replace this evidence. Hashes identify content; they are not signatures against someone who can edit the result files outside the worker.
+
+`--regrade` never executes the grader again. It checks the current workspace and grader against the saved hashes. Missing, changed or unavailable evidence cannot pass. Failed executable evaluations count as failures even when the worker crashes, unlike the older text-only grading. Keep the saved workspace to revalidate results. A changed grader needs a fresh trial. Executable failure makes a live evaluation exit 1. Regrading reports grade failures in its summary; its exit code 0 means the records were read successfully. Ordinary evaluations without `verify` keep their existing behavior and do not gain this OS boundary.
+
+Codex jobs also receive explicit command-line execution settings: reviews use `read-only`, implementations use `workspace-write`, approval escalation is disabled, command networking is disabled, and extra writable roots and shared temporary roots are removed. These settings rely on the installed Codex CLI's sandbox enforcement. They do not restrict the main Claude session or every external tool. Implementation checks that need network access or shared temporary writes now fail visibly instead of inheriting permissive user defaults.
+
+The log shows where the hook changed a route. It cannot show whether the other route would have been better, because only the chosen worker ran. For that question the same task must run several ways. The runner does that, grades each result and saves the numbers.
 
 ```bash
 node scripts/orch-eval.mjs examples/eval-tasks.json --dry-run
@@ -353,9 +371,9 @@ node scripts/orch-eval.mjs <task set.json> --arms off,sonnet,shadow,jev --runs 3
 
 A task set is a JSON file with a `tasks` list. Each task has a `name`, a `prompt` and a `cwd` (the project folder), and may set `model` (the main session's model, default `sonnet`), `budgetUsd` (the cap of one run, default 1), `timeoutS` (default 600), `allowedTools` (default `Read`, `Glob`, `Grep`, `Agent`) and `export` (run in a fresh copy of the committed tree, for a task that writes files). The file may set the same fields as defaults for all its tasks. `examples/eval-tasks.json` is a sample.
 
-Two fields grade a task. `expect` holds `contains` and `notContains`, lists of strings that the answer must or must not hold; every arm is graded by it, because a route that changes the answer is the failure to catch. `expectRoute` holds `agent` and `model`, the route the task should end at; only an arm whose hook runs in enforce mode is graded by it, because the other arms never reach the routing table. A run passes when every grader that applies to it passes. A run that failed or timed out is not graded at all.
+Alongside `verify`, two fields grade saved text and routing. `expect` holds `contains` and `notContains`, lists of strings that the answer must or must not hold. `expectRoute` holds `agent` and `model`, the expected route; only an arm in enforce mode is graded by it. A run passes when every applicable grader passes. Text-only tasks leave worker errors and timeouts ungraded. Executable tasks count them as failures.
 
-Grading reads the saved records only, so a changed grader or a changed expectation can be applied to an old run for free:
+Text expectations can be changed and applied to saved records without another model call. Executable evidence is revalidated against the saved workspace and original grader; changing the executable grader requires a fresh trial:
 
 ```bash
 node scripts/orch-eval.mjs <task set.json> --regrade ~/.claude/orchestrator/eval/<time>/

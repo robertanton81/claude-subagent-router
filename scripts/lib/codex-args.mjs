@@ -118,11 +118,16 @@ function scopeArgs(scope) {
 
 // The argument list for `codex`. When Codex gets the brief, it arrives on stdin ("-").
 export function buildCodexArgs(job, resultPath) {
+  // Command-line overrides win over a user's permissive defaults. The review
+  // has no write permission; implementation can write only its workspace.
+  const boundary = ["-c", 'approval_policy="never"', "-c", `sandbox_mode="${job.kind === "review" ? "read-only" : "workspace-write"}"`,
+    "-c", "sandbox_workspace_write.network_access=false", "-c", "sandbox_workspace_write.writable_roots=[]",
+    "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true"];
   if (job.kind === "implement") {
-    return ["exec", "-s", "workspace-write", "--json", "-o", resultPath, ...modelArgs(job), "-"];
+    return ["exec", "-s", "workspace-write", "--json", "-o", resultPath, ...modelArgs(job), ...boundary, "-"];
   }
   if (job.kind === "review") {
-    const args = ["exec", "review", ...scopeArgs(job.scope), "--json", "-o", resultPath, ...modelArgs(job)];
+    const args = ["exec", "review", ...scopeArgs(job.scope), "--json", "-o", resultPath, ...modelArgs(job), ...boundary];
     if (sendsBriefToCodex(job)) {
       args.push("-");
     }

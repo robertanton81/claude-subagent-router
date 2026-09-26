@@ -1,6 +1,6 @@
 // The offline evaluation: the same task runs in several arms (configurations)
-// through `claude -p`, and the numbers of each run are saved. It grades nothing
-// by itself; checkPassRule() below applies the pass rule to a summary. The
+// through `claude -p`, and the numbers of each run are saved. gradeRecord()
+// checks results; checkPassRule() applies the pass rule to a summary. The
 // runner is scripts/orch-eval.mjs.
 //
 // Arms:
@@ -21,6 +21,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { gradeVerification, loadVerification } from "./executable-grade.mjs";
 
 export const ARMS = {
   off: { plugin: false, env: {}, note: "Claude Code as it is, no plugin" },
@@ -41,7 +42,7 @@ export const DEFAULT_ARMS = ["off", "sonnet", "shadow", "jev"];
 export const EFFORT_ARMS = ["low", "medium"];
 
 const TASK_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const TASK_FIELDS = ["model", "budgetUsd", "timeoutS", "allowedTools", "export", "expect", "expectRoute"];
+const TASK_FIELDS = ["model", "budgetUsd", "timeoutS", "allowedTools", "export", "expect", "expectRoute", "verify"];
 const DEFAULTS = { model: "sonnet", budgetUsd: 1, timeoutS: 600, allowedTools: ["Read", "Glob", "Grep", "Agent"], export: false };
 // The switches that an arm sets. They are removed from the parent environment
 // first, so a value from the shell never reaches the wrong arm. The forced
@@ -192,6 +193,8 @@ export function loadTaskSet(file) {
     }
     checkExpect(merged.expect, name);
     checkExpectRoute(merged.expectRoute, name);
+    merged.verify = loadVerification(merged.verify, path.dirname(file), cwd);
+    if (merged.verify && !merged.export) throw new Error(`task "${name}": executable verification requires export: true`);
     return merged;
   });
   return { tasks };
@@ -255,7 +258,7 @@ export function prepareDataDir(dataDir, configFile = null) {
 
 // A fresh copy of the committed tree of a git repository, for a task that
 // writes files. The copy has no git history.
-export function exportWorkspace(repoDir, dest) {
+export function exportWorkspace(repoDir, dest, revision = "HEAD") {
   // This copy belongs to one run alone. An earlier run at the same task, arm and
   // number left its whole working tree here, including anything it wrote, and
   // `tar` would unpack over it rather than replace it. A file the earlier run
@@ -263,7 +266,7 @@ export function exportWorkspace(repoDir, dest) {
   fs.rmSync(dest, { recursive: true, force: true });
   fs.mkdirSync(dest, { recursive: true });
   const tarFile = path.join(path.dirname(dest), `${path.basename(dest)}.tar`);
-  execFileSync("git", ["-C", repoDir, "archive", "--format=tar", "-o", tarFile, "HEAD"], { stdio: ["ignore", "ignore", "pipe"] });
+  execFileSync("git", ["-C", repoDir, "archive", "--format=tar", "-o", tarFile, revision], { stdio: ["ignore", "ignore", "pipe"] });
   execFileSync("tar", ["-xf", tarFile, "-C", dest], { stdio: ["ignore", "ignore", "pipe"] });
   fs.rmSync(tarFile, { force: true });
   return dest;
@@ -271,17 +274,19 @@ export function exportWorkspace(repoDir, dest) {
 
 // Runs one invocation with a time limit. The child gets its own process group,
 // so the kill reaches the subagents and the commands it started.
-export function runOne(invocation, { timeoutMs }) {
+export function runOne(invocation, { timeoutMs, maxOutputBytes = 8 * 1024 * 1024 }) {
   return new Promise((resolve) => {
     const startedAt = Date.now();
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     let done = false;
+    let outputBytes = 0;
+    let outputLimit = false;
     const finish = (outcome) => {
       if (!done) {
         done = true;
-        resolve({ stdout, stderr, timedOut, durationMs: Date.now() - startedAt, ...outcome });
+        resolve({ stdout, stderr, timedOut, outputLimit, durationMs: Date.now() - startedAt, ...outcome });
       }
     };
     let child;
@@ -303,12 +308,30 @@ export function runOne(invocation, { timeoutMs }) {
       } catch {
         // The group is gone already.
       }
+      child.stdout.destroy();
+      child.stderr.destroy();
+      finish({ code: null, signal: "SIGKILL" });
     }, timeoutMs);
     // Decode as one stream, so a character that spans two chunks stays whole.
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => (stdout += chunk));
-    child.stderr.on("data", (chunk) => (stderr += chunk));
+    const collect = (chunk, isError) => {
+      outputBytes += Buffer.byteLength(chunk);
+      if (outputBytes > maxOutputBytes) {
+        outputLimit = true;
+        try { process.kill(-child.pid, "SIGKILL"); } catch { /* The group already ended. */ }
+        return;
+      }
+      if (isError) stderr += chunk;
+      else stdout += chunk;
+    };
+    child.stdout.on("data", (chunk) => collect(chunk, false));
+    child.stderr.on("data", (chunk) => collect(chunk, true));
+    child.on("exit", () => {
+      // Stop descendants even when the parent exits successfully. A retained
+      // output pipe must not keep an evaluation alive after its worker ends.
+      try { process.kill(-child.pid, "SIGKILL"); } catch { /* No descendants remain in the group. */ }
+    });
     child.on("error", (error) => {
       clearTimeout(timer);
       finish({ code: null, signal: null, spawnError: error.message });
@@ -411,7 +434,7 @@ export function gradeRecord(record, task) {
   // missing, and a string that must not appear may sit past the cut and look
   // absent. Such a run is not scored, rather than scored wrongly.
   const cutOff = typeof record.result_chars === "number" && record.result_chars > answer.length;
-  const scored = !record.is_error && !record.timed_out && !cutOff;
+  const scored = task?.verify ? true : !record.is_error && !record.timed_out && !cutOff;
   const contains = task?.expect?.contains ?? [];
   const notContains = task?.expect?.notContains ?? [];
   if (contains.length > 0) {
@@ -438,6 +461,12 @@ export function gradeRecord(record, task) {
       pass: dispatches.length >= min && matching === dispatches.length,
       detail: `${matching} of ${dispatches.length} dispatches as expected, at least ${min} wanted`
     });
+  }
+  if (task?.verify) {
+    const executable = gradeVerification(record, task);
+    graders.push({ name: "executable", ...executable });
+    graders.push({ name: "worker.completed", pass: !record.is_error && !record.timed_out, detail: record.is_error || record.timed_out ? "worker did not complete" : "completed" });
+    if (task.expect && cutOff) graders.push({ name: "answer.complete", pass: false, detail: "answer was truncated" });
   }
   // A record with no grader is not a pass and not a failure. It is ungraded,
   // and the pass rate leaves it out.
@@ -467,7 +496,7 @@ function cacheTokens(modelUsage) {
 // later grader needs it. The summary never prints it.
 export function makeRecord({ task, arm, run, invocation, outcome, dataDir, resultChars = 4000 }) {
   const result = parseResult(outcome.stdout);
-  const failed = Boolean(outcome.spawnError) || result === null || result.is_error === true || (outcome.code !== 0 && !outcome.timedOut);
+  const failed = Boolean(outcome.spawnError) || outcome.outputLimit || result === null || result.is_error === true || (outcome.code !== 0 && !outcome.timedOut);
   const isError = !outcome.timedOut && failed;
   const answer = typeof result?.result === "string" ? result.result : null;
   return {

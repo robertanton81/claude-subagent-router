@@ -1,6 +1,6 @@
 {
   "name": "claude-subagent-router",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "description": "Claude Code plugin that routes subagent work across Claude models and the Codex CLI.",
   "type": "module",
@@ -10,6 +10,7 @@
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
+    "test:boundaries": "ORCH_TEST_REQUIRE_BOUNDARY=1 node --test tests/executable-grade.test.mjs",
     "check": "for f in scripts/*.mjs scripts/lib/*.mjs .claude/hooks/*.mjs; do [ -e \"$f\" ] || continue; node --check \"$f\" || exit 1; done"
   }
 }

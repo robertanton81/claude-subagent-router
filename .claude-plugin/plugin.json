@@ -1,7 +1,7 @@
 {
   "name": "subagent-router",
   "displayName": "Subagent Router",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Routes subagent work across Claude models and the Codex CLI, inside the Claude Max and ChatGPT subscriptions.",
   "author": {
     "name": "Robert Anton"

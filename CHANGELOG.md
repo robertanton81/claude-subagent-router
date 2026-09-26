@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3
+
+- Executable evaluation tasks can use a trusted external Node grader. The runner protects grading assets from worker writes, grades a separate code snapshot without network access, records independent evidence, and rejects stale evidence during regrading. Unsupported execution boundaries stop before a worker starts.
+- Codex jobs now explicitly select read-only review or workspace-write implementation, with no approval escalation, command network access, extra writable roots or shared temporary writes.
+- CI requires real execution-boundary tests on macOS and Linux. Ubuntu runners load the supplied AppArmor profile for bubblewrap without disabling AppArmor globally.
+
 ## 0.3.2
 
 - Codex implement tasks and custom reviews now receive personal rules, parent and local instructions, recursive project rules, and allowed imports. Path conditions remain attached to rules. Skipped files and size limits are reported.

@@ -21,5 +21,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      - name: Install the Linux execution boundary
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap apparmor-profiles
+          # Ubuntu restricts unprivileged namespaces. Use its supplied policy
+          # for bwrap without disabling AppArmor across the runner.
+          sudo install -m 0644 /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+      - name: Check Linux namespace support
+        if: runner.os == 'Linux'
+        run: bwrap --unshare-all --ro-bind / / --proc /proc --dev /dev -- /usr/bin/true
+      - run: npm run test:boundaries
       - run: npm run check
       - run: npm test

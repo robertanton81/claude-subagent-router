@@ -74,18 +74,22 @@ test("parseOptions reads the flags and rejects bad values", () => {
 });
 
 test("buildCodexArgs builds the implement and the review command", () => {
+  const common = ["-c", "sandbox_workspace_write.network_access=false", "-c", "sandbox_workspace_write.writable_roots=[]",
+    "-c", "sandbox_workspace_write.exclude_slash_tmp=true", "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true"];
+  const reviewBoundary = ["-c", 'approval_policy="never"', "-c", 'sandbox_mode="read-only"', ...common];
   assert.deepEqual(buildCodexArgs({ kind: "implement", model: "m1", effort: "low" }, "/r.md"), [
-    "exec", "-s", "workspace-write", "--json", "-o", "/r.md", "-m", "m1", "-c", "model_reasoning_effort=low", "-"
+    "exec", "-s", "workspace-write", "--json", "-o", "/r.md", "-m", "m1", "-c", "model_reasoning_effort=low",
+    "-c", 'approval_policy="never"', "-c", 'sandbox_mode="workspace-write"', ...common, "-"
   ]);
   assert.deepEqual(buildCodexArgs({ kind: "review", scope: { type: "commit", value: "abc1234" }, has_brief: false }, "/r.md"), [
-    "exec", "review", "--commit", "abc1234", "--json", "-o", "/r.md"
+    "exec", "review", "--commit", "abc1234", "--json", "-o", "/r.md", ...reviewBoundary
   ]);
   // Codex refuses a prompt together with a scope flag, so a scoped review never sends the brief.
   assert.deepEqual(buildCodexArgs({ kind: "review", scope: null, has_brief: true }, "/r.md"), [
-    "exec", "review", "--uncommitted", "--json", "-o", "/r.md"
+    "exec", "review", "--uncommitted", "--json", "-o", "/r.md", ...reviewBoundary
   ]);
   assert.deepEqual(buildCodexArgs({ kind: "review", scope: { type: "custom" }, has_brief: true }, "/r.md"), [
-    "exec", "review", "--json", "-o", "/r.md", "-"
+    "exec", "review", "--json", "-o", "/r.md", ...reviewBoundary, "-"
   ]);
 });
 

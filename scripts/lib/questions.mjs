@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { PARSER_VERSION } from "./findings.mjs";
+import { EVIDENCE_VERSION } from "./evidence.mjs";
+
 // The five questions that Jev answers for every dispatch, and at the end the
 // one question about a finished worker's checks.
 // Jev sees only the brief. It does not see which worker the orchestrator asked
@@ -126,4 +130,43 @@ export function buildRequest(brief, config) {
     },
     questions: QUESTIONS
   };
+}
+
+// One question for each finding. Only the excerpt counts as evidence: the
+// reviewer's own explanation is a claim, not proof.
+export const TRIAGE_CRITERIA = Object.freeze({
+  supports: "The excerpt shows the problem that the finding describes.",
+  contradicts: "The excerpt shows that the described problem is not there, for example the check that the finding calls missing is present, or the code does what the finding says it fails to do.",
+  insufficient: "The excerpt does not show enough to decide, for example the behaviour depends on other files, on runtime state or on requirements that are not in the excerpt."
+});
+export const TRIAGE_OUTCOMES = Object.freeze(Object.keys(TRIAGE_CRITERIA));
+export const TRIAGE_MAX_FINDINGS = 12;
+
+function triageQuestion(n) {
+  return {
+    type: "choice",
+    instructions: `\`findings[${n}]\` is one finding of a code review: \`text\` is the reviewer's claim, \`excerpt\` is the code it cites, with line numbers. Judge only from the excerpt; the reviewer's explanation is not evidence. Does the excerpt support the finding?`,
+    criteria: TRIAGE_CRITERIA
+  };
+}
+
+export function buildTriageRequest(findings, config) {
+  const sent = findings.slice(0, TRIAGE_MAX_FINDINGS);
+  const questions = {};
+  sent.forEach((_finding, n) => (questions[`finding_${n}`] = triageQuestion(n)));
+  return {
+    request: {
+      model: config.jevModel,
+      state: { findings: sent.map((f) => ({ text: f.text, label: f.label, path: f.path, lines: `${f.start}-${f.end}`, excerpt: f.excerpt })) },
+      questions
+    },
+    skipped: findings.slice(TRIAGE_MAX_FINDINGS).map((f) => f.index)
+  };
+}
+
+const short = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 12);
+
+export function evalVersion(config) {
+  // The parser part covers the configured labels too: changing reviewFormats changes what is extracted.
+  return { questions: short([triageQuestion(0).instructions, TRIAGE_CRITERIA]), parser: short([PARSER_VERSION, config.reviewFormats ?? []]), evidence: `e${EVIDENCE_VERSION}`, model: config.jevModel };
 }

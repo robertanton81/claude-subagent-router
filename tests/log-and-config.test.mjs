@@ -12,7 +12,7 @@ import { QUESTIONS, buildRequest } from "../scripts/lib/questions.mjs";
 import { JevError, readAnswers } from "../scripts/lib/typesafe.mjs";
 import { lastWriterFamily, readLimitsState, recordWriterDispatch, recordWriterLaunch, recordWriterStop } from "../scripts/lib/context.mjs";
 import { countFindings, reportsNoWrite, verificationText } from "../scripts/lib/findings.mjs";
-import { CLAUDE_FALLBACK, FIVE_HOURS_MS, SEVEN_DAYS_MS, claudeCapNotice, claudeNotice, claudeState, firstNotice, windowVerdict } from "../scripts/lib/provider-state.mjs";
+import { CLAUDE_FALLBACK, FIVE_HOURS_MS, SEVEN_DAYS_MS, claudeCapNotice, claudeNotice, claudeState, codexState, firstNotice, windowVerdict } from "../scripts/lib/provider-state.mjs";
 import { readRouteLine } from "../scripts/lib/route-line.mjs";
 import { PS_TIMEOUT_MS } from "../scripts/lib/writer-lock.mjs";
 import { ROOT, cleanEnv, jevBody, makeTempDir, readLog, runNode, startFakeJev } from "./helpers.mjs";
@@ -195,7 +195,7 @@ test("the log hook writes one record for each of its three events", async () => 
 test("the session start hook prints the worker list as plain text", async () => {
   const tempDir = makeTempDir();
   try {
-    const result = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { ORCH_MODE: "shadow" }) });
+    const result = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_MODE: "shadow" }) });
     assert.equal(result.code, 0);
     assert.match(result.stdout, /"shadow" mode/);
     assert.match(result.stdout, /subagent-router:codex-reviewer/);
@@ -413,14 +413,15 @@ test("the session start hook tells the user when a subscription has no room", as
   try {
     fs.mkdirSync(path.join(tempDir, "data"), { recursive: true });
     fs.writeFileSync(path.join(tempDir, "data", "codex-limits.json"), JSON.stringify({ usedPercent: 100, resetsAt: Date.now() + 3600 * 1000, ts: Date.now() }));
-    const result = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir) });
+    const result = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret" }) });
     const output = JSON.parse(result.stdout);
-    assert.match(output.systemMessage, /^Subagent router: The weekly Codex allowance/);
+    // The used-up window can be the 5-hour one or the weekly one, so the text names neither.
+    assert.match(output.systemMessage, /^Subagent router: A Codex plan window of the ChatGPT plan is used up/);
     assert.equal(output.hookSpecificOutput.hookEventName, "SessionStart");
     assert.match(output.hookSpecificOutput.additionalContext, /subagent-router:searcher[\s\S]*State of the subscriptions right now/);
 
     // In shadow mode the hook changes nothing, so there is nothing to announce.
-    const shadow = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { ORCH_MODE: "shadow" }) });
+    const shadow = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_MODE: "shadow" }) });
     assert.ok(!shadow.stdout.trimStart().startsWith("{"));
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -449,7 +450,7 @@ test("the session start hook fails open: an error inside it gives exit 0, a line
 test("the session start hook names every worker in agents/, each Claude worker with the model of its file", async () => {
   const tempDir = makeTempDir();
   try {
-    const result = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir) });
+    const result = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret" }) });
     assert.equal(result.code, 0);
     const agentsDir = path.join(ROOT, "agents");
     const files = fs.readdirSync(agentsDir).filter((file) => file.endsWith(".md"));
@@ -500,7 +501,10 @@ test("with Codex off, the session start names the Codex workers as off and sends
     // Used-up numbers must not produce a notice about capacity while Codex is off.
     fs.mkdirSync(path.join(tempDir, "data"), { recursive: true });
     fs.writeFileSync(path.join(tempDir, "data", "codex-limits.json"), JSON.stringify({ usedPercent: 100, resetsAt: Date.now() + 3600 * 1000, ts: Date.now() }));
-    const result = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { ORCH_CODEX_ENABLED: "" }) });
+    // A fresh, low usage sample, so no limit notice either.
+    const limitsFile = path.join(tempDir, "limits-latest.json");
+    fs.writeFileSync(limitsFile, JSON.stringify({ ts: Math.floor(Date.now() / 1000), five_hour: 10, seven_day: 10 }));
+    const result = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_CODEX_ENABLED: "", ORCH_LIMITS_FILE: limitsFile }) });
     assert.equal(result.code, 0);
     assert.ok(!result.stdout.trimStart().startsWith("{"), "plain text, so no notice for the user");
     assert.match(result.stdout, /subagent-router:codex-reviewer: off\. Codex is opt-in/);
@@ -571,14 +575,36 @@ test("readRouteLine finds the line orch-route: keep only as a line of its own", 
 test("the session start names the model routing of other agent types only while it is on", async () => {
   const tempDir = makeTempDir();
   try {
-    const on = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir) });
+    const on = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret" }) });
     assert.match(on.stdout, /For every other agent type, the hook can change only the model/);
     assert.match(on.stdout, /orch-route: keep/);
 
-    const off = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { ORCH_ROUTE_OTHER_AGENTS: "0" }) });
+    const off = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_ROUTE_OTHER_AGENTS: "0" }) });
     assert.ok(!off.stdout.includes("For every other agent type"));
     assert.match(off.stdout, /Dispatches to other agent types pass unchanged, because `routeOtherAgents` is false/);
     assert.match(off.stdout, /orch-route: keep/, "the line still works for our own workers");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+// The provider fact once said that tasks go to Codex "while Claude usage is
+// high", with no word about Codex near its own limit. The routing table has
+// both exceptions (preferCodex, spareCodex and capAtSonnet in readFacts), so the
+// fact must name the same conditions.
+test("the provider fact names the conditions of each switch, as the routing table has them", async () => {
+  const tempDir = makeTempDir();
+  try {
+    const run = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret" }) });
+    const text = run.stdout.startsWith("{") ? JSON.parse(run.stdout).hookSpecificOutput.additionalContext : run.stdout;
+    const fact = text.split("\n").find((line) => line.startsWith("- When one subscription has no room left")) ?? "";
+    assert.match(fact, /sends Codex tasks to Claude workers while Codex has no capacity/);
+    assert.match(fact, /While Codex is near its own limit and Claude usage is not high, it keeps hard tasks on Claude workers/);
+    assert.match(fact, /While Claude usage is high and Codex is not near its own limit, it sends tasks that change files and have a complete brief to Codex/);
+    assert.match(fact, /While both are near their limits and Codex can still take work, the limit rule moves nothing/);
+    const nothing = fact.indexOf("moves nothing");
+    const cap = fact.indexOf("While Claude usage is high and Codex has no capacity, the hook picks no model above Sonnet");
+    assert.ok(nothing >= 0 && cap > nothing, `the Sonnet cap must follow the conditions: ${fact}`);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -590,19 +616,74 @@ test("at a high Claude usage the session start names the switch that the hook wi
     const limitsFile = path.join(tempDir, "limits-latest.json");
     fs.writeFileSync(limitsFile, JSON.stringify({ ts: Math.floor(Date.now() / 1000), five_hour: 91, seven_day: 40 }));
 
-    const codexOff = JSON.parse((await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { ORCH_CODEX_ENABLED: "", ORCH_LIMITS_FILE: limitsFile }) })).stdout);
+    const codexOff = JSON.parse((await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_CODEX_ENABLED: "", ORCH_LIMITS_FILE: limitsFile }) })).stdout);
     assert.match(codexOff.systemMessage, /Claude usage is at 91% of the 5-hour window and 40% of the 7-day window\. Codex cannot take work, so tasks that would run on Opus now run on Sonnet/);
     assert.ok(!codexOff.systemMessage.includes("now run on Codex"));
 
-    const codexOn = JSON.parse((await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { ORCH_LIMITS_FILE: limitsFile }) })).stdout);
+    const codexOn = JSON.parse((await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_LIMITS_FILE: limitsFile }) })).stdout);
     assert.match(codexOn.systemMessage, /Tasks with a complete brief now run on Codex/);
     assert.ok(!codexOn.systemMessage.includes("Opus"));
 
     // With Jev off nothing moves, so the start promises no switch and says why.
-    const jevOff = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { ORCH_JEV_ENABLED: "", ORCH_LIMITS_FILE: limitsFile }) });
+    const jevOff = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_JEV_ENABLED: "", ORCH_LIMITS_FILE: limitsFile }) });
     assert.ok(!jevOff.stdout.includes("systemMessage"), jevOff.stdout);
     assert.match(jevOff.stdout, /Routing is off, because `jevEnabled` is not true/);
     assert.ok(!jevOff.stdout.includes("now run on"), "a switch that will not happen was promised");
+
+    // Codex is near its own limit too. The table then neither moves work to
+    // Codex nor lowers Opus, so the start must promise neither switch.
+    fs.mkdirSync(path.join(tempDir, "data"), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, "data", "codex-limits.json"), JSON.stringify({ usedPercent: 93, resetsAt: Date.now() + 3600 * 1000, ts: Date.now() }));
+    const bothTight = JSON.parse((await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_LIMITS_FILE: limitsFile }) })).stdout);
+    assert.match(bothTight.systemMessage, /Claude usage is at 91% of the 5-hour window and 40% of the 7-day window\. Codex is near its own limit too \(93% used\), so the limit rule moves nothing: each task takes its normal route\./);
+    assert.ok(!bothTight.systemMessage.includes("now run on"), "a switch that will not happen was promised");
+
+    // Codex near its own limit while Claude has room. Only the table changes
+    // (hard tasks stay on Claude), and that is no switch to announce, so the
+    // start is plain text with no notice at all.
+    const calmFile = path.join(tempDir, "limits-calm.json");
+    fs.writeFileSync(calmFile, JSON.stringify({ ts: Math.floor(Date.now() / 1000), five_hour: 40, seven_day: 40 }));
+    const codexOnlyTight = await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_LIMITS_FILE: calmFile }) });
+    assert.ok(!codexOnlyTight.stdout.startsWith("{"), codexOnlyTight.stdout);
+    assert.ok(!codexOnlyTight.stdout.includes("State of the subscriptions"), codexOnlyTight.stdout);
+    // The provider fact says "near its own limit" too, so the check names the notice.
+    assert.ok(!codexOnlyTight.stdout.includes("Codex is near its own limit too"), "Claude is not tight, so there is no notice about both limits");
+    // Positive control: the start still ran in full. A crash or an empty start
+    // would pass every check above.
+    assert.equal(codexOnlyTight.code, 0, codexOnlyTight.stderr);
+    assert.match(codexOnlyTight.stdout, /Workers for delegated work:/);
+    assert.equal(codexOnlyTight.stderr, "");
+
+    // Codex used up: it is tight and cannot take work. The cap on Opus applies,
+    // so the start must name it and not the notice for both limits. This holds
+    // only because session-start tests "cannot take work" before "near its limit".
+    fs.writeFileSync(path.join(tempDir, "data", "codex-limits.json"), JSON.stringify({ usedPercent: 100, resetsAt: Date.now() + 3600 * 1000, ts: Date.now() }));
+    const usedUp = JSON.parse((await runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_LIMITS_FILE: limitsFile }) })).stdout);
+    assert.match(usedUp.systemMessage, /Codex cannot take work, so tasks that would run on Opus now run on Sonnet/);
+    assert.ok(!usedUp.systemMessage.includes("near its own limit"), usedUp.systemMessage);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+// Codex counts as near its own limit from the gate on, the gate included, and
+// the gate is the user's setting, not a fixed number.
+test("codexState counts Codex as tight from limitGate on, also with a gate that is not the default", () => {
+  const tempDir = makeTempDir();
+  try {
+    const dataDir = path.join(tempDir, "data");
+    fs.mkdirSync(dataDir, { recursive: true });
+    const env = { ORCH_DATA_DIR: dataDir };
+    const tightAt = (usedPercent, config) => {
+      fs.writeFileSync(path.join(dataDir, "codex-limits.json"), JSON.stringify({ usedPercent, resetsAt: Date.now() + 3600 * 1000, ts: Date.now() }));
+      return codexState(config, env).tight;
+    };
+    const gate70 = { ...DEFAULTS, codexEnabled: true, limitGate: 70 };
+    assert.equal(tightAt(69, gate70), false, "below the gate");
+    assert.equal(tightAt(70, gate70), true, "at the gate");
+    assert.equal(DEFAULTS.limitGate, 80, "the next lines assume the default gate of 80");
+    assert.equal(tightAt(80, { ...DEFAULTS, codexEnabled: true }), true, "at the default gate");
+    assert.equal(tightAt(79, { ...DEFAULTS, codexEnabled: true }), false, "below the default gate");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -614,7 +695,7 @@ test("the session start says once when the limit rule cannot act, because the us
     const limitsFile = path.join(tempDir, "limits-latest.json");
     // A sample from 90 minutes ago, as the desktop app leaves it: it runs no status line.
     fs.writeFileSync(limitsFile, JSON.stringify({ ts: Math.floor(Date.now() / 1000) - 90 * 60, five_hour: 95, seven_day: 40 }));
-    const env = cleanEnv(tempDir, { ORCH_LIMITS_FILE: limitsFile });
+    const env = cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_LIMITS_FILE: limitsFile });
     const start = (source) => runNode("scripts/session-start.mjs", { env, stdin: JSON.stringify({ session_id: "s1", cwd: tempDir, source }) });
 
     const first = JSON.parse((await start("startup")).stdout);
@@ -626,11 +707,15 @@ test("the session start says once when the limit rule cannot act, because the us
     const again = await start("compact");
     assert.ok(!again.stdout.includes("The limit rule is off"), again.stdout);
 
-    // Without a sample file the user never set the status line up. The README
-    // says the rule is then off, so no notice at each start.
+    // Without a sample file the rule is off too. Since 2026-09-30 that gets its
+    // own notice, once per session: the desktop app runs no status line, and a
+    // desktop-only user was never told.
     fs.rmSync(limitsFile);
     const missing = await runNode("scripts/session-start.mjs", { env, stdin: JSON.stringify({ session_id: "s2", cwd: tempDir, source: "startup" }) });
-    assert.ok(!missing.stdout.includes("The limit rule is off"), missing.stdout);
+    assert.match(JSON.parse(missing.stdout).systemMessage, /The limit rule is off: no Claude usage sample exists/);
+    assert.ok(!missing.stdout.includes("minutes old"), missing.stdout);
+    const missingAgain = await runNode("scripts/session-start.mjs", { env, stdin: JSON.stringify({ session_id: "s2", cwd: tempDir, source: "compact" }) });
+    assert.ok(!missingAgain.stdout.includes("no Claude usage sample"), missingAgain.stdout);
 
     // With Jev off the rule does nothing anyway, so there is nothing to warn about.
     fs.writeFileSync(limitsFile, JSON.stringify({ ts: Math.floor(Date.now() / 1000) - 90 * 60, five_hour: 95 }));
@@ -1011,7 +1096,7 @@ test("the pace settings are read from config.json and bad values fall back with 
 test("the session start hook writes a session record with the project and the configuration in force, and none without hook input", async () => {
   const tempDir = makeTempDir();
   try {
-    const env = cleanEnv(tempDir, { ORCH_MODE: "shadow" });
+    const env = cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_MODE: "shadow" });
     const input = JSON.stringify({ hook_event_name: "SessionStart", session_id: "s-9", cwd: "/work/project", source: "resume", transcript_path: "/x" });
     const result = await runNode("scripts/session-start.mjs", { stdin: input, env });
     assert.equal(result.code, 0);
@@ -1182,7 +1267,7 @@ test("a rotation that another process did first loses no record", () => {
 test("the session start offers the configure skill only while no settings file exists", async () => {
   const tempDir = makeTempDir();
   try {
-    const env = cleanEnv(tempDir, { ORCH_MODE: "shadow" });
+    const env = cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_MODE: "shadow" });
     // Nobody has configured anything yet, so the session is told once that every
     // setting is at its default, and which skill changes that.
     const first = await runNode("scripts/session-start.mjs", { env });
@@ -1308,6 +1393,69 @@ test("a failed or unknown verification answer is logged as an error and keeps th
     assert.ok(!fs.readFileSync(path.join(tempDir, "data", "dispatch-log.jsonl"), "utf8").includes("test-key-not-a-secret"), "the key never reaches the log");
   } finally {
     await jev.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("the session start says once per session that Jev has no key, never with a key or in mode off", async () => {
+  const tempDir = makeTempDir();
+  try {
+    const start = (extra, session = "k1") => runNode("scripts/session-start.mjs", { env: cleanEnv(tempDir, { ORCH_MODE: "shadow", ...extra }), stdin: JSON.stringify({ session_id: session, cwd: tempDir, source: "startup" }) });
+    const first = await start({});
+    assert.match(JSON.parse(first.stdout).systemMessage, /Jev is on, but no TypeSafe key reached the hooks/);
+    // CLAUDE_PLUGIN_ROOT is not under the plugins cache in tests: the session-only sentence appears.
+    assert.match(first.stdout, /subagent-router@inline/);
+    const again = await start({});
+    assert.ok(!again.stdout.includes("no TypeSafe key"), "once per session");
+    const withKey = await start({ TYPESAFE_API_KEY: "test-key-not-a-secret" }, "k2");
+    assert.ok(!withKey.stdout.includes("no TypeSafe key"), withKey.stdout);
+    assert.ok(!withKey.stdout.includes("test-key-not-a-secret"), "the key is never printed");
+    const modeOff = await start({ ORCH_MODE: "off" }, "k3");
+    assert.ok(!modeOff.stdout.includes("no TypeSafe key"), "mode off: the key is not the reason");
+    const installed = await start({ CLAUDE_PLUGIN_ROOT: path.join(tempDir, ".claude", "plugins", "cache", "m", "subagent-router", "1.0.0") }, "k4");
+    assert.match(installed.stdout, /Set the plugin option typesafe_api_key/);
+    assert.ok(!installed.stdout.includes("subagent-router@inline"), installed.stdout);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("the session start shows the triage status once per day while the triage logs", async () => {
+  const tempDir = makeTempDir();
+  try {
+    const dataDir = path.join(tempDir, "data");
+    fs.mkdirSync(path.join(dataDir, "labels"), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, "config.json"), JSON.stringify({ mode: "shadow", triageMode: "log", jevModel: "jev-1.13.0" }));
+    const env = cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_MODE: "shadow" });
+    const start = (session) => runNode("scripts/session-start.mjs", { env, stdin: JSON.stringify({ session_id: session, cwd: tempDir, source: "startup" }) });
+    // Positive control first: no registered window, no line.
+    assert.ok(!(await start("d0")).stdout.includes("Finding triage"));
+    const registration = { start: new Date().toISOString(), end: new Date(Date.now() + 86400000).toISOString(), evalVersion: {}, population: { triageProjects: [], agentTypes: [] } };
+    // A scored window shows no line, and does not use up the day's notice.
+    fs.writeFileSync(path.join(dataDir, "labels", "pools.json"), JSON.stringify({ rule: {}, registration, exposedGroups: [], scoredVersions: [{}] }));
+    assert.ok(!(await start("d-scored")).stdout.includes("Finding triage"), "no line after the score");
+    fs.writeFileSync(path.join(dataDir, "labels", "pools.json"), JSON.stringify({ rule: {}, registration, exposedGroups: [], scoredVersions: [] }));
+    assert.match((await start("d1")).stdout, /Finding triage, day 0 of the window/);
+    assert.ok(!(await start("d2")).stdout.includes("Finding triage"), "once per day, also for another session");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a damaged labels file costs only the triage line, not the session facts", async () => {
+  const tempDir = makeTempDir();
+  try {
+    const dataDir = path.join(tempDir, "data");
+    fs.mkdirSync(path.join(dataDir, "labels"), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, "config.json"), JSON.stringify({ mode: "shadow", triageMode: "log" }));
+    fs.writeFileSync(path.join(dataDir, "labels", "pools.json"), "{ cut off");
+    const env = cleanEnv(tempDir, { TYPESAFE_API_KEY: "test-key-not-a-secret", ORCH_MODE: "shadow" });
+    const result = await runNode("scripts/session-start.mjs", { env, stdin: JSON.stringify({ session_id: "x1", cwd: tempDir, source: "startup" }) });
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /Workers for delegated work/, "the facts are still printed");
+    assert.match(result.stderr, /triage status could not be read/);
+    assert.ok(readLog(tempDir).some((r) => r.event === "hook_error" && /triage status/.test(r.error)));
+  } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

@@ -9,6 +9,7 @@ import path from "node:path";
 import test, { mock } from "node:test";
 
 import { restoreRequest, writeRequest } from "../scripts/lib/codex-request.mjs";
+import { scanJobs, sweepSince } from "../scripts/lib/sweep.mjs";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -284,6 +285,116 @@ test("a Codex that runs past max_run_minutes is stopped, the job ends with 124, 
         process.kill(pid, "SIGKILL");
       }
     }
+  });
+});
+
+// The shared settings of the finding triage, in the settings file. The end of
+// a job follows only this file, never one session's ORCH_ switches.
+function writeTriageSettings(env, project, values = {}) {
+  fs.mkdirSync(env.ORCH_DATA_DIR, { recursive: true });
+  fs.writeFileSync(path.join(env.ORCH_DATA_DIR, "config.json"), JSON.stringify({ jevEnabled: true, triageMode: "log", triageProjects: [project], ...values }));
+}
+
+function makeReviewJob(env, project, jobId) {
+  const jobDir = path.join(jobsDir(env), jobId);
+  fs.mkdirSync(jobDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(jobDir, "job.json"),
+    JSON.stringify({ id: jobId, kind: "review", cwd: project, scope: { type: "uncommitted" }, has_brief: false, created_at: new Date().toISOString() })
+  );
+  return jobDir;
+}
+
+const sinceFileOf = (env) => path.join(env.ORCH_DATA_DIR, "triage", "sweep-since.json");
+
+function skipReasonOf(env, jobId) {
+  const file = path.join(env.ORCH_DATA_DIR, "triage", "skipped", `job-${jobId}.json`);
+  return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")).reason : null;
+}
+
+// The triage is switched on again with no launcher run since the job ended.
+// The next scan publishes a start time if none is there, and returns the ids
+// of the jobs that it would send.
+async function scanAfterSwitchOn(env, project) {
+  await sleep(20);
+  writeTriageSettings(env, project);
+  return scanJobs(sweepSince(env), env).map((job) => job.id);
+}
+
+function waitForExit(child, what, ms = 15000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${what} did not end`)), ms);
+    child.on("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+// The real runner ends a review job; a stand-in Codex answers at once.
+async function endByRunner(tempDir, env, jobDir) {
+  const fakeCodex = writeFakeCodex(tempDir, 'const args = process.argv.slice(2);\nrequire("node:fs").writeFileSync(args[args.indexOf("-o") + 1], "- [P2] a finding\\n");\n');
+  const runner = spawn(process.execPath, [RUNNER, jobDir], { env: { ...env, ORCH_CODEX_BIN: fakeCodex }, stdio: "ignore" });
+  await waitForExit(runner, "the runner");
+  assert.equal(fs.readFileSync(path.join(jobDir, "exit-code"), "utf8").trim(), "0");
+}
+
+test("a review job that the runner ends while the triage is off for everyone removes the start time, so it is never sent", async () => {
+  await withTemp(async ({ tempDir, env, project }) => {
+    const offSettings = [{ triageMode: "off" }, { jevEnabled: false }, { triageProjects: [] }];
+    for (const [n, off] of offSettings.entries()) {
+      writeTriageSettings(env, project);
+      sweepSince(env);
+      // The triage goes off, the job ends, and no launcher runs in between.
+      writeTriageSettings(env, project, off);
+      const jobId = `20261003-120000-00000${n}`;
+      await endByRunner(tempDir, env, makeReviewJob(env, project, jobId));
+      assert.equal(fs.existsSync(sinceFileOf(env)), false, `${JSON.stringify(off)}: the end of the job removes the start time`);
+      assert.deepEqual(await scanAfterSwitchOn(env, project), [], JSON.stringify(off));
+      assert.equal(skipReasonOf(env, jobId), "before_start", JSON.stringify(off));
+    }
+
+    // Positive control: on in the settings file at the end of the job. One
+    // session's own switches are off, and the job end must not follow them.
+    writeTriageSettings(env, project);
+    const since = sweepSince(env);
+    const before = fs.readFileSync(sinceFileOf(env), "utf8");
+    await sleep(20);
+    const jobId = "20261003-120000-0000aa";
+    await endByRunner(tempDir, { ...env, ORCH_MODE: "off", ORCH_JEV_ENABLED: "0" }, makeReviewJob(env, project, jobId));
+    assert.equal(fs.readFileSync(sinceFileOf(env), "utf8"), before, "the start time stays while the triage is on");
+    assert.deepEqual(scanJobs(since, env).map((job) => job.id), [jobId]);
+  });
+});
+
+test("a cancel that ends a review job while the triage is off for everyone removes the start time; while it is on, the time stays", async () => {
+  await withTemp(async ({ env, project }) => {
+    // The runner of the job died, so the cancel writes the exit code itself.
+    const cancel = async (jobId, extraEnv = {}) => {
+      const jobDir = makeReviewJob(env, project, jobId);
+      fs.writeFileSync(path.join(jobDir, "runner.pid"), String(deadPid()));
+      const result = await runNode(CLI, { args: ["cancel", jobId], env: { ...env, ...extraEnv }, cwd: project });
+      assert.ok(result.stdout.startsWith(`CODEX_CANCELLED ${jobId}\n`), result.stdout);
+      assert.equal(fs.readFileSync(path.join(jobDir, "exit-code"), "utf8").trim(), "130");
+    };
+
+    writeTriageSettings(env, project);
+    sweepSince(env);
+    writeTriageSettings(env, project, { triageMode: "off" });
+    const offJob = "20261003-130000-0000b1";
+    await cancel(offJob);
+    assert.equal(fs.existsSync(sinceFileOf(env)), false, "the cancel removes the start time");
+    assert.deepEqual(await scanAfterSwitchOn(env, project), []);
+    assert.equal(skipReasonOf(env, offJob), "before_start");
+
+    // Positive control: on in the settings file, with one session's switches off.
+    const since = sweepSince(env);
+    const before = fs.readFileSync(sinceFileOf(env), "utf8");
+    await sleep(20);
+    const onJob = "20261003-130000-0000c2";
+    await cancel(onJob, { ORCH_MODE: "off", ORCH_JEV_ENABLED: "0" });
+    assert.equal(fs.readFileSync(sinceFileOf(env), "utf8"), before, "the start time stays while the triage is on");
+    assert.deepEqual(scanJobs(since, env).map((job) => job.id), [onJob]);
   });
 });
 

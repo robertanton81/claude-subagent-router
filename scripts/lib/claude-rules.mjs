@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { isSensitivePath } from "./secret-patterns.mjs";
 import { checkoutRoot } from "./writer-lock.mjs";
 
 const FILE_CHARS = 16000;
@@ -89,13 +90,7 @@ export function claudeRules(cwd, config, { home = os.homedir(), warn = (message)
       if (files >= MAX_FILES || remaining <= 0) return omitted(file, "rules size or file limit reached");
       // Never follow an import to a conventional credential file, even inside
       // the project. Both the written path and a symlink's target are checked.
-      const sensitive = (name) => {
-        const segments = name.split(path.sep);
-        return segments.some((part) => [".git", ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure"].includes(part)) ||
-          /[/\\]\.config[/\\](?:gh|gcloud)[/\\]/.test(name) ||
-          /^(?:\.env(?:\..*)?|\.envrc|\.credentials(?:\..*)?|credentials(?:\.(?:json|toml|ya?ml|ini|xml))?|\.npmrc|\.netrc|\.git-credentials|\.pypirc|\.pgpass|\.htpasswd|\.dockercfg|\.vault-token|id_(?:rsa|ed25519|ecdsa|dsa))$|\.(?:pem|key|p12|pfx|tfstate|tfvars|jks|keystore|kdbx|gpg)$/i.test(path.basename(name));
-      };
-      if (sensitive(file) || sensitive(real)) return omitted(file, "credential file is not an instruction source");
+      if (isSensitivePath(file) || isSensitivePath(real)) return omitted(file, "credential file is not an instruction source");
       if (chain.includes(real)) return omitted(file, "circular import");
       files += 1;
       // Bound the read itself, rather than loading an arbitrarily large file.

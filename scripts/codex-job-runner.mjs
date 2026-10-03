@@ -22,6 +22,8 @@ import { codexPlanIsUsedUp, readCodexLimits } from "./lib/codex-limits.mjs";
 import { loadConfig } from "./lib/config.mjs";
 import { makeFilePrivate } from "./lib/log.mjs";
 import { describeTime } from "./lib/provider-state.mjs";
+import { removeSweepSince, sharedEnv } from "./lib/sweep.mjs";
+import { triageOn } from "./lib/triage-core.mjs";
 import { releaseWriterLock } from "./lib/writer-lock.mjs";
 
 const jobDir = process.argv[2];
@@ -106,13 +108,33 @@ function fail(code, note) {
   }
 }
 
-// The exit code is the one fact that the waiter needs, so it is written first.
-// The note and the lock come after it, each guarded, so a full disk cannot lose the code.
+// The finding triage sends only review jobs that end after its start time. The
+// launcher removes that time while the triage is off, but it runs only at turn
+// ends. A job that ended while the triage was off, with no launcher run before
+// the triage was switched on again, kept the old time and was sent. So the end
+// of every job removes the time too, before the exit code marks the job as
+// ended. Only the settings that all sessions share count, as in the launcher.
+// A failure here never stops the job.
+function removeTriageStartWhileOff() {
+  try {
+    const { config } = loadConfig(sharedEnv());
+    if (!triageOn(config) || config.triageProjects.length === 0) {
+      removeSweepSince();
+    }
+  } catch (error) {
+    process.stderr.write(`the triage start time could not be checked or removed: ${error.message}\n`);
+  }
+}
+
+// The exit code is the one fact that the waiter needs. Only the guarded check
+// of the triage start time comes before it. The note and the lock come after
+// it, each guarded, so a full disk cannot lose the code.
 function finish(code, note) {
   if (finished) {
     return;
   }
   finished = true;
+  removeTriageStartWhileOff();
   try {
     const temporary = path.join(jobDir, "exit-code.tmp");
     fs.writeFileSync(temporary, String(code));
@@ -222,7 +244,7 @@ try {
   } else if (codexPlanIsUsedUp(limits) && !config.codexSpendCredits) {
     finish(
       75,
-      `The weekly Codex allowance of the ChatGPT plan is used up until ${describeTime(limits.resetsAt)}, so this job was not started. ` +
+      `A Codex plan window of the ChatGPT plan is used up until ${describeTime(limits.resetsAt)}, so this job was not started. ` +
         `Codex would pay for it from bought credits (balance ${limits.creditsBalance ?? "unknown"}). ` +
         "Send the task to a Claude worker: subagent-router:implementer, or subagent-router:reviewer for a review. " +
         'To allow credits, set "codexSpendCredits": true in ~/.claude/orchestrator/config.json.'

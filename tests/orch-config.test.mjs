@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
@@ -45,7 +46,11 @@ test("the spec and the loader agree on what every setting accepts", () => {
               ? spec.min
               : spec.kind === "textList"
                 ? ["some-agent"]
-                : "something";
+                : spec.kind === "pathList"
+                  ? ["/some/checkout"]
+                  : spec.kind === "formatList"
+                    ? [{ agentTypes: ["acme:review-bot"], labels: ["MUST-FIX"], emptyPhrases: ["no findings"] }]
+                    : "something";
       assert.deepEqual(loadWith(key, good).config[key], good, `the loader dropped a value the spec accepts for ${key}`);
 
       // Both ends of a range, from the accepting side. Checking only the lower
@@ -67,7 +72,18 @@ test("the spec and the loader agree on what every setting accepts", () => {
       if (spec.kind === "textList") {
         continue;
       }
-      const bad = spec.kind === "number" ? spec.max + 1 : spec.kind === "flag" ? "maybe" : spec.kind === "choice" ? "nonsense" : 42;
+      const bad =
+        spec.kind === "number"
+          ? spec.max + 1
+          : spec.kind === "flag"
+            ? "maybe"
+            : spec.kind === "choice"
+              ? "nonsense"
+              : spec.kind === "pathList"
+                ? ["relative/path"]
+                : spec.kind === "formatList"
+                  ? [{ agentTypes: [], labels: ["X"] }]
+                  : 42;
       assert.throws(() => parseSetting(key, bad), new RegExp(key), `the spec accepted a bad value for ${key}`);
       const loaded = loadWith(key, bad);
       // A bad value falls back to the default, except the mode, where the safe
@@ -166,6 +182,50 @@ test("set writes only checked values, and one bad value changes nothing", async 
     assert.equal(unknown.code, 2);
     assert.match(unknown.stderr, /"modus" is not a setting/);
     assert.deepEqual(readConfig(file), { codexEnabled: true, limitGate: 70 });
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("set triageProjects takes only checkout top folders, also as a JSON list, and says when a change applies", async () => {
+  const { tempDir, env, file } = setUp();
+  try {
+    fs.mkdirSync(path.join(tempDir, "repo", "src"), { recursive: true });
+    const repo = fs.realpathSync(path.join(tempDir, "repo"));
+    execFileSync("git", ["init", "-q"], { cwd: repo, stdio: "pipe" });
+    const outside = path.join(tempDir, "plain");
+    fs.mkdirSync(outside);
+    const cases = [
+      [path.join(tempDir, "nope"), /does not exist/],
+      [outside, /is not inside a git checkout/],
+      [path.join(repo, "src"), new RegExp(`is inside the checkout "${repo}"\\. List that top folder instead`)]
+    ];
+    for (const [entry, message] of cases) {
+      const refused = await runNode(COMMAND, { args: ["set", "triageMode=log", `triageProjects=${entry}`], env });
+      assert.equal(refused.code, 2, entry);
+      assert.match(refused.stderr, message);
+    }
+    assert.equal(fs.existsSync(file), false, "a refused path wrote nothing, not even the other pair");
+
+    const taken = await runNode(COMMAND, { args: ["set", `triageProjects=${JSON.stringify([repo])}`], env });
+    assert.equal(taken.code, 0, taken.stderr);
+    assert.deepEqual(readConfig(file).triageProjects, [repo]);
+    assert.match(taken.stdout, /applies from the next subagent call/);
+    assert.doesNotMatch(taken.stdout, /keeps its settings/);
+    const unset = await runNode(COMMAND, { args: ["unset", "triageProjects"], env });
+    assert.match(unset.stdout, /applies from the next subagent call/);
+
+    // A symbolic link to the top folder is accepted, and its real path is stored.
+    const link = path.join(tempDir, "link-to-repo");
+    fs.symlinkSync(repo, link);
+    const linked = await runNode(COMMAND, { args: ["set", `triageProjects=${link}`], env });
+    assert.equal(linked.code, 0, linked.stderr);
+    assert.deepEqual(readConfig(file).triageProjects, [repo]);
+
+    // An inherited GIT_DIR makes git call any folder a top folder; it is ignored.
+    const withGitDir = await runNode(COMMAND, { args: ["set", `triageProjects=${outside}`], env: { ...env, GIT_DIR: path.join(repo, ".git") } });
+    assert.equal(withGitDir.code, 2);
+    assert.match(withGitDir.stderr, /is not inside a git checkout/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -312,4 +372,98 @@ test("explain describes one setting or all of them, and changes nothing", async 
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+// The "allowed" line was once built for four kinds only, and every other kind
+// fell through to "a text value". The two list settings of the triage then told
+// a person to write plain text where JSON or absolute paths are needed.
+test("explain gives every setting that is not a text the rule of its own kind", async () => {
+  const { tempDir, env } = setUp();
+  try {
+    const keys = Object.entries(CONFIG_SPEC)
+      .filter(([, spec]) => spec.kind !== "text")
+      .map(([key]) => key);
+    const runs = await Promise.all(keys.map((key) => runNode(COMMAND, { args: ["explain", key], env })));
+    runs.forEach((run, index) => {
+      assert.equal(run.code, 0, run.stderr);
+      assert.ok(!run.stdout.includes("a text value"), `explain ${keys[index]} says "a text value": ${run.stdout}`);
+    });
+    const allowed = (key) => runs[keys.indexOf(key)].stdout.split("\n").find((line) => line.trim().startsWith("allowed:")) ?? "";
+
+    // The exact rule for each simple kind, built from the spec, so a setting
+    // that gets the rule of another kind, or a wrong range, fails here.
+    const expected = {
+      choice: (spec) => `one of ${spec.values.join(", ")}`,
+      number: (spec) => `a number from ${spec.min} to ${spec.max}`,
+      flag: () => "true or false",
+      textList: () => "a list of names, written as one comma-separated value"
+    };
+    const checked = {};
+    for (const key of keys) {
+      const spec = CONFIG_SPEC[key];
+      if (!expected[spec.kind]) continue;
+      assert.equal(allowed(key), `  allowed: ${expected[spec.kind](spec)}`, `explain ${key}`);
+      checked[spec.kind] = (checked[spec.kind] ?? 0) + 1;
+    }
+    // Every kind above has at least one setting, so no check is empty.
+    for (const kind of Object.keys(expected)) assert.ok(checked[kind] > 0, `no setting of the kind ${kind} was checked`);
+
+    assert.match(allowed("triageProjects"), /absolute paths, as a JSON list or split by commas/);
+    assert.match(allowed("triageProjects"), /a path that holds a comma needs the JSON form/);
+    assert.match(allowed("triageProjects"), /top folder of a git checkout/);
+    assert.match(allowed("reviewFormats"), /a JSON list of objects such as \[\{"agentTypes":\["my-reviewer"\],"labels":\["BLOCKING"\]\}\]/);
+    assert.match(allowed("reviewFormats"), /no other key is allowed/);
+
+    // A setting of the kind "text" keeps the plain answer.
+    const text = await runNode(COMMAND, { args: ["explain", "jevModel"], env });
+    assert.match(text.stdout, /allowed: a text value/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("the triage settings default to off, an empty list and no projects", () => {
+  const { config } = loadConfig({ ORCH_DATA_DIR: makeTempDir("orch-config-triage-"), PATH: process.env.PATH });
+  assert.equal(config.triageMode, "off");
+  assert.deepEqual(config.reviewFormats, []);
+  assert.deepEqual(config.triageProjects, []);
+  assert.equal(config.triageWorktrees, false);
+});
+
+function loadFile(values) {
+  const dataDir = makeTempDir("orch-config-triage-");
+  fs.writeFileSync(path.join(dataDir, "config.json"), JSON.stringify(values));
+  return loadConfig({ ORCH_DATA_DIR: dataDir, PATH: process.env.PATH });
+}
+
+test("triageMode keeps log, and refuses annotate until it is built", () => {
+  assert.equal(loadFile({ triageMode: "log" }).config.triageMode, "log");
+  const annotate = loadFile({ triageMode: "annotate" });
+  assert.equal(annotate.config.triageMode, "off");
+  assert.match(annotate.warnings.join("\n"), /annotate.*not built yet/);
+});
+
+test("reviewFormats keeps good entries and drops each bad one with a warning", () => {
+  const good = { agentTypes: ["acme:review-bot"], labels: ["MUST-FIX"], emptyPhrases: ["no findings"] };
+  const { config, warnings } = loadFile({
+    reviewFormats: [good, { agentTypes: [], labels: ["X"] }, { agentTypes: ["a"], labels: [3] }, { agentTypes: ["a"], labels: ["X"], extra: 1 }]
+  });
+  assert.deepEqual(config.reviewFormats, [good]);
+  assert.equal(warnings.filter((w) => /reviewFormats/.test(w)).length, 3);
+});
+
+test("parseSetting reads reviewFormats as JSON and refuses bad JSON with a sentence", () => {
+  assert.deepEqual(parseSetting("reviewFormats", '[{"agentTypes":["x"],"labels":["BLOCKING"]}]'), [{ agentTypes: ["x"], labels: ["BLOCKING"] }]);
+  assert.throws(() => parseSetting("reviewFormats", "[{"), /reviewFormats must be JSON/);
+});
+
+test("triageProjects keeps absolute paths and drops the rest with a warning", () => {
+  const { config, warnings } = loadFile({ triageProjects: ["/a/b", "rel/c"] });
+  assert.deepEqual(config.triageProjects, ["/a/b"]);
+  assert.match(warnings.join("\n"), /triageProjects/);
+  assert.deepEqual(parseSetting("triageProjects", "/a,/b"), ["/a", "/b"]);
+  // The JSON form, which a path with a comma needs.
+  assert.deepEqual(parseSetting("triageProjects", '["/a,b", "/c"]'), ["/a,b", "/c"]);
+  assert.throws(() => parseSetting("triageProjects", '["/a"'), /not valid JSON/);
+  assert.throws(() => parseSetting("triageProjects", '["rel"]'), /absolute paths/);
 });

@@ -22,7 +22,7 @@ node scripts/orch-eval.mjs <task set.json> --arms off,sonnet,shadow,jev --runs 3
 
 ## Task sets
 
-A task set is a JSON file with a `tasks` list. Each task must set its own `name`, `prompt` and `cwd`. The file may also set defaults for all its tasks: `model`, `budgetUsd`, `timeoutS`, `allowedTools`, `export`, `expect`, `expectRoute` and `verify`.
+A task set is a JSON file with a `tasks` list. Each task must set its own `name`, `prompt` and `cwd`. The file may also set defaults for all its tasks: `model`, `budgetUsd`, `timeoutS`, `allowedTools`, `export`, `history`, `expect`, `expectRoute` and `verify`.
 
 | Field | Meaning | Default |
 | :-- | :-- | :-- |
@@ -34,6 +34,7 @@ A task set is a JSON file with a `tasks` list. Each task must set its own `name`
 | `timeoutS` | The time limit of one run, in seconds. | 600 |
 | `allowedTools` | The tools the main session may use. | `Read`, `Glob`, `Grep`, `Agent` |
 | `export` | Run in a fresh copy of the last commit. Use it for a task that writes files. | off |
+| `history` | With `export`, the copy keeps the git history up to the last commit, without a remote. Use it for a review task that needs a base commit and a change commit. | off |
 | `expect` | The text grader. See [Graders](#graders). | none |
 | `expectRoute` | The route grader. See [Graders](#graders). | none |
 | `verify` | The executable grader. See [Executable graders](#executable-graders). | none |
@@ -69,7 +70,7 @@ node scripts/orch-eval.mjs <task set.json> --regrade ~/.claude/orchestrator/eval
 - Effort is how much the model thinks before it answers. `low` and `medium` are the single-model baselines. Anthropic measured that one model at a lower effort often costs less than a setup with several models.
 - The shell's `CLAUDE_CODE_EFFORT_LEVEL` and `CLAUDE_EFFORT` never reach an arm. So each arm runs at the effort it names, or at the default of its model.
 - Other session variables from your shell do reach the plugin arms, for example `ORCH_CODEX_ENABLED`, `ORCH_COMPLETE_RULE`, `ORCH_ROUTE_OTHER_AGENTS`, `ORCH_JEV_TIMEOUT_MS` and `ORCH_TYPESAFE_URL`. They win over the defaults and over the `--config` file. Unset them before a run.
-- Each run gets its own data folder inside the results folder, which is `~/.claude/orchestrator/eval/<time>/` by default (see [Results](#results)). So the runs leave the log, the locks, the settings file and the other state files in your real `~/.claude/orchestrator/` alone. A run has no usage sample, so the limit rules, the pace rule included, are off.
+- Each run gets its own data folder inside the results folder, which is `~/.claude/orchestrator/eval/<time>/` by default, or a temporary folder for a task set with an editing task (see [Results](#results)). So the runs leave the log, the locks, the settings file and the other state files in your real `~/.claude/orchestrator/` alone. A run has no usage sample, so the limit rules, the pace rule included, are off.
 - `--config <file>` gives the plugin arms a copy of a config file. Without it, the defaults apply, with Codex off.
 - The `shadow` and `jev` arms turn Jev on for themselves. They read the key from `TYPESAFE_API_KEY` in the shell that starts the runner.
 - The prompt cache keeps the start of a prompt, so that the next call can reuse it at a lower price. The first run in a round finds an empty cache and pays more. Each round starts with a different arm, so this extra cost does not always fall on the same arm.
@@ -107,6 +108,11 @@ Read the column "cache new" before the cost. A run that wrote many tokens into t
 ## Results
 
 The results go to `~/.claude/orchestrator/eval/<time>/`, or to the folder that `--out` names.
+
+A task set with an editing task (`export: true`) is different. Each such run works in a copy inside the results folder, and Claude Code denies every write inside a protected folder in `dontAsk` mode, whatever the allow rules say. `.claude` is protected (except `.claude/worktrees`), as are `.git`, the plugin folder and a few others; see "Protected paths" on Claude Code's permission-modes page. So:
+
+- Without `--out`, the results go to `<temporary folder>/orchestrator-eval/<time>/`. The system may clean that folder up, so pass `--out` with a lasting folder to keep the evidence.
+- An `--out` folder inside a protected folder is refused before any run starts, also through a symbolic link.
 
 - `runs.jsonl` has one line per run: the cost, the turns, the durations, the models that ran, the number of refused tool calls, the dispatches of the plugin's hook with the model that then ran, and the answer cut to `--result-chars`. Executable tasks add their evidence and `source_revision`.
 - A failed or timed-out run also keeps the last 2,000 characters of its error output in `runs.jsonl`. This text is not redacted, so treat the file as private output of the run.

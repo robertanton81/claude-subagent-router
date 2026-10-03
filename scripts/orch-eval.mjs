@@ -19,6 +19,7 @@
 // symbolic links.
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -35,6 +36,7 @@ import {
   loadTaskSet,
   makeRecord,
   prepareDataDir,
+  protectedReason,
   renderPlan,
   renderSummary,
   rotateArms,
@@ -153,7 +155,25 @@ async function main() {
     return;
   }
 
-  const outDir = path.resolve(values.out ?? path.join(dataDir(), "eval", stamp()));
+  // An editing task runs in a workspace inside the results folder, and Claude
+  // Code denies every write inside a protected folder in dontAsk mode, such as
+  // ~/.claude, the default home of the results. So editing tasks default to a
+  // temporary folder, and no folder that would block their writes is accepted.
+  const editing = taskSet.tasks.filter((task) => task.export);
+  const defaultOut = editing.length ? path.join(os.tmpdir(), "orchestrator-eval", stamp()) : path.join(dataDir(), "eval", stamp());
+  const outDir = path.resolve(values.out ?? defaultOut);
+  if (editing.length) {
+    const planned = editing.flatMap((task) => arms.flatMap((arm) => Array.from({ length: runs }, (_, index) => path.join(outDir, task.name, arm, `run-${index + 1}`, "workspace"))));
+    for (const dir of [outDir, ...planned]) {
+      const reason = protectedReason(dir, { pluginDir: ROOT });
+      if (reason) {
+        throw new Error(`the results folder ${outDir} cannot hold the workspaces of editing tasks: ${reason}, and Claude Code denies every write there in dontAsk mode. Pass --out with a folder outside such paths.`);
+      }
+    }
+    if (values.out === undefined) {
+      process.stdout.write("Editing tasks: the results go to a temporary folder, which the system may clean up. Pass --out with a lasting folder outside protected paths to keep them.\n");
+    }
+  }
   const claudeBin = process.env.ORCH_EVAL_CLAUDE_BIN || "claude";
   process.stdout.write(renderPlan(taskSet, arms, runs, { outDir, maxTotalUsd }));
 
@@ -198,7 +218,7 @@ async function main() {
         prepareDataDir(runData, values.config ?? null);
         let cwd = task.cwd;
         if (task.export) {
-          cwd = exportWorkspace(task.cwd, path.join(runDir, "workspace"), revisions.get(task.name));
+          cwd = exportWorkspace(task.cwd, path.join(runDir, "workspace"), revisions.get(task.name), { history: task.history });
         }
         if (task.verify) cwd = fs.realpathSync(cwd);
         const invocation = buildInvocation(task, arm, { claudeBin, pluginDir: ROOT, dataDir: runData, cwd });

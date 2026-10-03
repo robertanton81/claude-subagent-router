@@ -107,6 +107,7 @@ Claude Code passes the plugin option only to hooks, so the check cannot see the 
 
 - For each subagent call that the routing hook sends to Jev: the call's description, its whole brief and the text of five questions. By default this is almost every subagent call of the main session. The hook sends nothing for a call from inside a subagent, for `statusline-setup` and `claude-code-guide`, and for the agent types that you exclude below. An `orch-route: keep` line does not stop the send.
 - When one of the plugin's own workers finishes: the `Verification:` part of its answer (the lines that say which checks ran), at most 2,000 characters, with one question. The file list and the rest of the answer stay on your machine.
+- Only while the finding triage is on (`"triageMode": "log"`) and only for the checkouts listed in `triageProjects`: when a review agent finishes, or when any Codex review job ends (also a direct `node scripts/orch-codex.mjs review` run, from any session on this machine), each finding that cites code (at most 1,500 characters), with its label and the cited path and line range, and a short excerpt of the cited code (at most 6,000 characters, at most 12 findings per request), with one question per finding. Known token shapes, URL passwords, `Authorization` header credentials and secret-like assignments (any name that holds a word such as password, secret, token or api key) are masked before anything is cut or sent. A finding is held back whole when its text quotes the first or the last line of a private key, when a file that it cites holds such a line anywhere, or when it cites a file with a common credential name, such as `.env` or `*.pem`. No excerpt is read from a binary or UTF-16 file, and, for a review agent's report, none from a file that git ignores. Not caught, for example: a text that quotes only the body lines of a key, a name without one of the words (`DB_PASS`), a default value (`|| "secret"`), and a value split over lines. This masking is best effort, not a guarantee: names and other personal data in code are not masked, so list only checkouts whose code may leave your machine. For a Codex job, an excerpt is sent only when it provably equals the reviewed code, which only a commit review (`review --commit`) allows. The send can happen up to 10 minutes after the session that started the scan has ended, from a background process.
 - A brief can hold code and project rules. A verification part can quote test output.
 - To send less: `"routeOtherAgents": false` keeps the briefs of all agent types outside the plugin on your machine. `keepModelAgents` does the same for the agent types that it names. `"mode": "off"` sends nothing, and so does `"jevEnabled": false`, the default.
 - `jevUrl` and `ORCH_TYPESAFE_URL` change where these requests go.
@@ -216,7 +217,7 @@ For each routed brief, Jev answers five questions:
 
 A table in code, [scripts/lib/routing-table.mjs](scripts/lib/routing-table.mjs), turns the answers into a route. The questions are in [scripts/lib/questions.mjs](scripts/lib/questions.mjs).
 
-When one of the plugin's workers finishes, the log hook, the plugin's hook that records the end of each worker, asks one more question about the `Verification:` part of the answer. Did the checks pass, fail or not run, or is it unclear? The report counts the answers. Without a Jev answer, the report uses a word search instead, which can read "0 fail" or "no errors" as a failure. The report uses the word search while Jev is off, after a failed Jev call, and for older records.
+When one of the plugin's workers finishes, the log hook, the plugin's hook that records the end of each worker, asks one more question about the `Verification:` part of the answer. Did the checks pass, fail or not run, or is it unclear? The report counts the answers. Without a Jev answer, the report uses a word search instead, which can read "no errors" as a failure. A count of zero, such as "0 failed" or "fail 0", counts as a pass. The report uses the word search while Jev is off, after a failed Jev call, and for older records.
 
 ### While Jev is off
 
@@ -274,6 +275,8 @@ Codex answers in the read-only sandbox, so it changes no files. It can still rea
 ## Use
 
 After the install and the setup, work as usual. The routing hook routes each subagent call by itself, and every dispatch goes to the log. `/subagent-router:report` shows what the routing did; see [The report](REFERENCE.md#the-report). `/subagent-router:configure` changes the settings.
+
+To review a branch, a pull request or your uncommitted work, ask for a review or run `/subagent-router:review`. It reviews three things separately: the repository's documented rules (Standards), what the issue or plan asked for (Spec), and bugs (Correctness). Correctness goes to the other model family only when routing can move it: Jev on, the `enforce` mode, Codex on and able to take work, a brief that Jev reads as a self-contained review, and no Codex worker as the last worker that changed files in the session. With the default settings both parts run on Claude. The report names the model that really ran each part, and lists a problem that two parts found only once. It costs one worker dispatch for a small change that runs on Claude anyway, and two otherwise. Some of its instructions adapt MIT-licensed work; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ### Why was a call not rerouted?
 
@@ -413,6 +416,19 @@ The values of `completeRule`:
 | `promptLogChars` | `20000` | How much of a brief the log keeps. `0` keeps briefs out of the log entirely. |
 | `resultLogChars` | `4000` | How much of a worker's answer the log keeps. |
 
+### Finding triage
+
+When a review agent finishes, the triage hook can split its report into findings, read the code that each finding cites, and ask Jev whether that code supports the finding. Codex reviews take another path: at the end of each turn and at session start, a short hook starts a background process that takes every finished Codex review job once, whoever started it. Both run in the background, so a session never waits for them, and both only log: no judgement reaches the session. They change no finding. The only triage text that a session shows is the daily progress line of an evaluation window, described below.
+
+| Key | Default | Meaning |
+| :-- | :-- | :-- |
+| `triageMode` | `off` | `log` turns the triage on. It needs `jevEnabled` too. |
+| `triageProjects` | `[]` | The checkout roots, as absolute paths, for which the triage may send findings and excerpts. A path counts only when it is exactly the root of the session's git checkout. `orch-config.mjs set` refuses a path that does not exist, is not in git, or is a folder below the root (it names the root), and it stores the real path, so a symbolic link cannot move later. Write a JSON list, or paths split by commas. Empty sends nothing. |
+| `triageWorktrees` | `false` | `true` lets each checkout in `triageProjects` also cover every worktree of the same repository, including worktrees made later. The match is exact, never a path prefix: the same git common directory (the shared `.git` folder that all worktrees of one repository use), and git must list the folder as one of that checkout's worktrees. With `false`, a second worktree has its own root and needs its own entry. |
+| `reviewFormats` | `[]` | Which agent types report findings with which labels, for example `[{"agentTypes":["my-reviewer"],"labels":["BLOCKING","SUGGESTION"],"emptyPhrases":["no findings"]}]`. The plugin's own reviewers and Codex reviews use `[P0]` to `[P3]` and need no entry. |
+
+`node scripts/orch-label.mjs` measures whether Jev's judgements can be trusted before any of them could reach a session: `reserve`, `register --start <date> --end <date> [--agent-types <a,b>]` (a date alone means 00:00 UTC, so the end date itself is not in the window), `status`, `sample --name <name>`, `label <folder>` and `score <folder>`. You label a blind sample yourself, and the score is checked once against a fixed bar. Pin `jevModel` to an exact version first. While a window is registered, the session start shows its progress once a day, for all sessions together; you see the line, and the model gets it as session context. After the window ends, the line says what to run next, and once the window is scored it stops. See [Finding triage](REFERENCE.md#finding-triage).
+
 ### Settings for one session
 
 These variables override the settings file for a single session, for example `ORCH_MODE=shadow claude ...`. They let you try something out without editing the file.
@@ -443,6 +459,7 @@ The files in the data folder are listed in [The data folder](REFERENCE.md#the-da
 - **So a job can spend credits although `codexSpendCredits` is `false`.** When the saved numbers are old, the plugin can miss that a Codex window has reached 100 percent.
 - **The routing table and the gates are first guesses.** A gate is the lowest confidence, or the usage level, at which a rule acts. The log shows where Jev and the main session disagree. It cannot show which route would have been better. That needs the same tasks with routing on and off; see [EVALUATION.md](EVALUATION.md).
 - **For another agent type, the hook does not read the agent file.** So the log cannot tell whether a rewrite changed the model that would have run. When the agent file already names the model of the table, the log still says `rewrite`. In `shadow` mode, the `launched` line shows the model that runs without a rewrite.
+- **The finding triage only logs.** Its judgements reach no session until an evaluation passes, and that step is not built yet. Many review agents cite no `file:line`, and a finding without a citation gets no judgement, so a sample can take weeks to fill. For Codex jobs, only commit reviews give evidence; base, uncommitted and custom reviews are parsed and counted, but nothing of them is sent, because Codex compares them with the working tree, which can change before the triage reads it.
 - **The Sonnet cap is narrow.** It covers only the routes that the table picks, and only while Codex cannot take work. While Codex can take work, a hard task that does not move to Codex still runs on Opus when Claude is near its limit. Examples: a call to another agent type, a diagnosis that changes no files, and a hard implement or debug task whose brief is not self-contained.
 
 ## More documentation

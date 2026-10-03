@@ -239,9 +239,9 @@ test("an arm that fails more often than the baseline does not pass", () => {
 });
 
 test("checkPassRule refuses a verdict on too few runs or on unequal cache warmth", () => {
-  // A run that errored or timed out cannot be graded, so the fixture derives
-  // `graded` from the runs that survived rather than letting a test state an
-  // impossible arm, such as 2 runs with 3 grades.
+  // In a task without `verify`, a run that errored or timed out is not graded,
+  // so the fixture derives `graded` from the runs that survived rather than
+  // letting a test state an impossible arm, such as 2 runs with 3 grades.
   const arm = (extra = {}) => {
     const base = { runs: 3, errors: 0, timeouts: 0, cost_mean_usd: 0.1, cost_stderr_usd: 0.0005, cache_created_mean: 20000, failed_graders: {}, ...extra };
     const graded = extra.graded ?? base.runs - base.errors - base.timeouts;
@@ -286,7 +286,16 @@ test("checkPassRule refuses a verdict on too few runs or on unequal cache warmth
   assert.equal(tooFew.t.verdict, "NOT DECIDED");
   assert.match(tooFew.t.reasons[0], /fewer than 3 graded runs/);
   const errored = checkPassRule(summary({ runs: 3, errors: 1, cost_mean_usd: 0.05 }, {}));
-  assert.match(errored.t.reasons[0], /fewer than 3 graded runs/, "an errored run cannot be graded, so it is not evidence");
+  assert.match(errored.t.reasons[0], /fewer than 3 graded runs/, "in a task without `verify` an errored run is not graded, so it is not evidence");
+  // The summary does not say whether the task had `verify`, so the reason must
+  // hold for both kinds. With `verify` an errored run is graded, as a failure.
+  assert.match(errored.t.reasons[0], /a task without `verify` does not grade a run that errored, timed out or was cut off; a task with `verify` grades every run, and an errored or timed-out run fails/);
+  assert.ok(!errored.t.reasons[0].includes("cannot be graded"), errored.t.reasons[0]);
+  assert.match(errored.t.reasons[0], /\(jev 2 of 3, sonnet 3 of 3\)/, "the reason counts the graded runs of each arm");
+  // The rule holds for the baseline arm too: a short baseline is no evidence.
+  const shortBaseline = checkPassRule(summary({ cost_mean_usd: 0.05 }, { runs: 3, errors: 1 }));
+  assert.equal(shortBaseline.t.verdict, "NOT DECIDED");
+  assert.match(shortBaseline.t.reasons[0], /fewer than 3 graded runs per arm \(jev 3 of 3, sonnet 2 of 3\)/);
 
   const cache = checkPassRule(summary({ cost_mean_usd: 0.05, cache_created_mean: 60000 }, {}));
   assert.equal(cache.t.verdict, "NOT DECIDED");
@@ -657,6 +666,95 @@ test("a task with export runs in a fresh copy of the committed tree", async () =
     assert.equal(second.code, 0, second.stderr);
     assert.ok(!fs.existsSync(leftover), "the copy starts from the commit, not from what the last run left");
     assert.ok(fs.existsSync(path.join(workspace, "a.mjs")), "the committed tree is there again");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a task with export and history runs in a clone that keeps the commits up to the pinned revision", async () => {
+  const { tempDir, project, taskSetFile, log, env } = setUp();
+  try {
+    const git = (...args) => execFileSync("git", ["-C", project, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { encoding: "utf8" }).trim();
+    git("init", "-q");
+    git("add", ".");
+    git("commit", "-q", "-m", "base");
+    fs.writeFileSync(path.join(project, "change.txt"), "the change under review\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "change");
+    writeTaskSet(taskSetFile, [{ name: "review", prompt: "x", cwd: project, export: true, history: true }]);
+    const outDir = path.join(tempDir, "out");
+    const result = await runNode("scripts/orch-eval.mjs", { args: [taskSetFile, "--arms", "off", "--out", outDir], env });
+    assert.equal(result.code, 0, result.stderr);
+    const workspace = path.join(outDir, "review", "off", "run-1", "workspace");
+    assert.equal(readLines(log)[0].cwd, fs.realpathSync(workspace), "the worker ran in the clone");
+    const history = execFileSync("git", ["-C", workspace, "log", "--all", "--format=%s"], { encoding: "utf8" }).trim().split("\n");
+    assert.deepEqual(history, ["change", "base"], "the runner passed history through to the export");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+// Claude Code denies every write inside a protected folder in dontAsk mode, such
+// as ~/.claude, so an editing task with its workspace there can never write.
+function committedProject(project) {
+  const git = (...args) => execFileSync("git", ["-C", project, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { stdio: ["ignore", "ignore", "pipe"] });
+  git("init", "-q");
+  git("add", ".");
+  git("commit", "-q", "-m", "one");
+}
+
+test("editing tasks refuse a results folder where Claude Code blocks writes, before any worker starts", async () => {
+  const { tempDir, project, taskSetFile, log, env } = setUp();
+  try {
+    committedProject(project);
+    writeTaskSet(taskSetFile, [{ name: "edit", prompt: "x", cwd: project, export: true }]);
+    fs.mkdirSync(path.join(tempDir, ".claude", "worktrees", "w", ".git"), { recursive: true });
+    fs.symlinkSync(path.join(tempDir, ".claude"), path.join(tempDir, "link"));
+    const refused = [
+      ["a .claude folder that does not exist yet", path.join(tempDir, ".claude", "orchestrator", "eval", "new")],
+      ["a .git folder inside .claude/worktrees", path.join(tempDir, ".claude", "worktrees", "w", ".git", "out")],
+      ["a symbolic link into .claude", path.join(tempDir, "link", "out")],
+      ["the plugin folder", path.join(ROOT, "eval-out-that-must-not-exist")]
+    ];
+    for (const [label, out] of refused) {
+      const result = await runNode("scripts/orch-eval.mjs", { args: [taskSetFile, "--arms", "off", "--out", out], env });
+      assert.notEqual(result.code, 0, `${label} is refused`);
+      assert.match(result.stderr, /denies every write there/, `${label}: the error names the reason`);
+    }
+    assert.equal(fs.existsSync(log), false, "no worker started for a refused folder");
+    assert.equal(fs.existsSync(path.join(ROOT, "eval-out-that-must-not-exist")), false, "nothing was created in the plugin folder");
+
+    // A protected temporary folder is refused too, when it would be the default.
+    const protectedTmp = path.join(tempDir, ".claude", "tmp");
+    fs.mkdirSync(protectedTmp);
+    const byDefault = await runNode("scripts/orch-eval.mjs", { args: [taskSetFile, "--arms", "off"], env: { ...env, TMPDIR: protectedTmp } });
+    assert.notEqual(byDefault.code, 0, "a default inside a protected temporary folder is refused");
+    assert.equal(fs.existsSync(log), false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("editing tasks may use .claude/worktrees and default to a temporary folder; read-only tasks keep any folder", async () => {
+  const { tempDir, project, taskSetFile, log, env } = setUp();
+  try {
+    committedProject(project);
+    writeTaskSet(taskSetFile, [{ name: "edit", prompt: "x", cwd: project, export: true }]);
+    const inWorktrees = await runNode("scripts/orch-eval.mjs", { args: [taskSetFile, "--arms", "off", "--out", path.join(tempDir, ".claude", "worktrees", "w", "out")], env });
+    assert.equal(inWorktrees.code, 0, inWorktrees.stderr);
+
+    const tmp = path.join(tempDir, "tmp");
+    fs.mkdirSync(tmp);
+    const byDefault = await runNode("scripts/orch-eval.mjs", { args: [taskSetFile, "--arms", "off"], env: { ...env, TMPDIR: tmp } });
+    assert.equal(byDefault.code, 0, byDefault.stderr);
+    assert.match(byDefault.stdout, /results go to a temporary folder, which the system may clean up/);
+    const runsUnderTmp = fs.readdirSync(path.join(tmp, "orchestrator-eval"));
+    assert.equal(runsUnderTmp.length, 1, "the default results folder is inside the temporary folder");
+
+    writeTaskSet(taskSetFile, [{ name: "read", prompt: "x", cwd: project }]);
+    const readOnly = await runNode("scripts/orch-eval.mjs", { args: [taskSetFile, "--arms", "off", "--out", path.join(tempDir, ".claude", "read-only")], env });
+    assert.equal(readOnly.code, 0, readOnly.stderr);
+    assert.equal(readLines(log).length, 3, "all three runs started");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

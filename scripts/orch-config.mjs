@@ -20,7 +20,14 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { CONFIG_SPEC, DEFAULTS, dataDir, loadConfig, parseSetting, settingSpec } from "./lib/config.mjs";
+import { repoState } from "./lib/evidence.mjs";
 import { ensurePrivateDir } from "./lib/log.mjs";
+
+// Every hook is a new process that reads the file again, so a change reaches the
+// hooks at their next call. Only the text that the session-start hook gave the
+// model (the mode, which workers are on) stays until the session starts again.
+const APPLIES =
+  "The hooks read this file at every call, so the change applies from the next subagent call. An open session keeps the start text it was given (the mode and which workers are on) until it starts, resumes or compacts again.";
 
 const USAGE = `Usage:
   node scripts/orch-config.mjs show
@@ -119,17 +126,57 @@ function explain(key) {
   if (!spec) {
     throw new Error(`"${key}" is not a setting of this plugin.`);
   }
-  const allowed =
-    spec.kind === "choice"
-      ? `one of ${spec.values.join(", ")}`
-      : spec.kind === "number"
-        ? `a number from ${spec.min} to ${spec.max}`
-        : spec.kind === "flag"
-          ? "true or false"
-          : spec.kind === "textList"
-            ? "a list of names, written as one comma-separated value"
-            : "a text value";
-  return [`${key}`, `  ${spec.about}`, `  allowed: ${allowed}`, `  default: ${JSON.stringify(DEFAULTS[key])}`].join("\n");
+  return [`${key}`, `  ${spec.about}`, `  allowed: ${allowedText(key, spec)}`, `  default: ${JSON.stringify(DEFAULTS[key])}`].join("\n");
+}
+
+// One text for each kind of setting. A kind without a text throws, so a new kind
+// cannot fall through to the answer of another kind. These texts say what
+// parseSetting in lib/config.mjs and checkCheckoutRoots below accept.
+function allowedText(key, spec) {
+  switch (spec.kind) {
+    case "choice":
+      return `one of ${spec.values.join(", ")}`;
+    case "number":
+      return `a number from ${spec.min} to ${spec.max}`;
+    case "flag":
+      return "true or false";
+    case "textList":
+      return "a list of names, written as one comma-separated value";
+    case "pathList": {
+      const form = "absolute paths, as a JSON list or split by commas (a path that holds a comma needs the JSON form)";
+      // Only triageProjects has the checkout check in `set`.
+      return key === "triageProjects"
+        ? `${form}; each must exist and be the top folder of a git checkout, and its real path is stored`
+        : form;
+    }
+    case "formatList":
+      return 'a JSON list of objects such as [{"agentTypes":["my-reviewer"],"labels":["BLOCKING"]}]; agentTypes and labels are non-empty lists of text, emptyPhrases is an optional list of text, and no other key is allowed';
+    case "text":
+      return "a text value";
+    default:
+      throw new Error(`${key} has the kind "${spec.kind}", which explain does not know.`);
+  }
+}
+
+// The triage compares each entry exactly with the real path of the checkout's
+// top folder, so a path that is missing, outside git or below the top folder
+// would never match and would send nothing, without any message.
+function checkCheckoutRoots(entries) {
+  const real = [];
+  for (const entry of entries) {
+    if (!fs.existsSync(entry)) {
+      throw new Error(`triageProjects: "${entry}" does not exist.`);
+    }
+    const repo = repoState(entry);
+    if (!repo.root) {
+      throw new Error(`triageProjects: "${entry}" is not inside a git checkout.`);
+    }
+    if (fs.realpathSync(entry) !== fs.realpathSync(repo.root)) {
+      throw new Error(`triageProjects: "${entry}" is inside the checkout "${repo.root}". List that top folder instead.`);
+    }
+    real.push(fs.realpathSync(entry));
+  }
+  return [...new Set(real)];
 }
 
 function set(pairs, env) {
@@ -149,7 +196,13 @@ function set(pairs, env) {
       throw new Error(`"${pair}" is not a <key>=<value>.`);
     }
     const key = pair.slice(0, at).trim();
-    wanted.push({ key, value: parseSetting(key, pair.slice(at + 1)) });
+    let value = parseSetting(key, pair.slice(at + 1));
+    if (key === "triageProjects") {
+      // The real path is stored, so a symbolic link that is pointed elsewhere
+      // later cannot move the consent to other code.
+      value = checkCheckoutRoots(value);
+    }
+    wanted.push({ key, value });
   }
   const values = { ...onDisk.values };
   const changes = [];
@@ -163,7 +216,7 @@ function set(pairs, env) {
     );
   }
   writeFile(file, values);
-  return [`Written to ${file}:`, ...changes.map((line) => `- ${line}`), "", "A session that is already open keeps its settings until it starts again."].join("\n");
+  return [`Written to ${file}:`, ...changes.map((line) => `- ${line}`), "", APPLIES].join("\n");
 }
 
 function unset(keys, env) {
@@ -189,7 +242,7 @@ function unset(keys, env) {
     }
   }
   writeFile(file, values);
-  return [`Written to ${file}:`, ...changes.map((line) => `- ${line}`)].join("\n");
+  return [`Written to ${file}:`, ...changes.map((line) => `- ${line}`), "", APPLIES].join("\n");
 }
 
 function main() {

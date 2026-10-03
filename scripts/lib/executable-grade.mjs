@@ -130,7 +130,10 @@ export function boundWorker(invocation, prepared) {
     if (["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "CLAUDE_CODE_OAUTH_TOKEN", "TYPESAFE_API_KEY", "CLAUDE_PLUGIN_OPTION_TYPESAFE_API_KEY"].includes(name) ||
         name.startsWith("LC_") || name.startsWith("ORCH_") || ["CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL_FORCE"].includes(name)) env[name] = value;
   }
-  Object.assign(env, { TMPDIR: prepared.scratch, TMP: prepared.scratch, TEMP: prepared.scratch });
+  // Claude Code keeps its own temp files, the Bash tool's included, under
+  // CLAUDE_CODE_TMPDIR, by default /tmp. The boundary blocks /tmp, so without
+  // this line every shell command of the worker fails with EPERM.
+  Object.assign(env, { TMPDIR: prepared.scratch, TMP: prepared.scratch, TEMP: prepared.scratch, CLAUDE_CODE_TMPDIR: prepared.scratch });
   return wrapInvocation({ ...invocation, env }, prepared.workerOptions);
 }
 

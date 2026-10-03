@@ -4,11 +4,14 @@
 // because text that reads like a system command can be treated as an injection.
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { dataDir, loadConfig } from "./lib/config.mjs";
 import { appendLog } from "./lib/log.mjs";
-import { claudeCapNotice, claudeNotice, claudeState, codexNotice, codexState, firstNotice, limitsBlindNotice } from "./lib/provider-state.mjs";
+import { claudeAndCodexTightNotice, claudeCapNotice, claudeNotice, claudeState, codexNotice, codexState, firstNotice, limitsBlindNotice, limitsMissingNotice } from "./lib/provider-state.mjs";
+import { statusLine } from "./lib/labels.mjs";
+import { findApiKey } from "./lib/typesafe.mjs";
 
 // Nobody has set anything yet, so every setting is at its default and Codex is
 // off. Saying so once, with the skill that changes it, is friendlier than
@@ -81,7 +84,7 @@ function main() {
   const providerFact = !jevOn
     ? `- Routing is off, because \`jevEnabled\` is not true in the configuration: the hook changes no model, also when Claude usage is high, and each worker runs on the model of its agent file.${codexOn ? " While Codex has no capacity, a call to a Codex worker still runs on its Claude counterpart." : ""}`
     : codexOn
-    ? "- When one subscription has no room left, work goes on with the other provider. The hook sends Codex tasks to Claude workers while Codex has no capacity, and it sends tasks with a complete brief to Codex while Claude usage is high. While Claude usage is high and Codex has no capacity, the hook picks no model above Sonnet. The main session tells the user in one sentence when a worker reports such a switch."
+    ? "- When one subscription has no room left, work goes on with the other provider. The hook sends Codex tasks to Claude workers while Codex has no capacity. While Codex is near its own limit and Claude usage is not high, it keeps hard tasks on Claude workers, and it can move a call to subagent-router:codex-implementer to a Claude worker. While Claude usage is high and Codex is not near its own limit, it sends tasks that change files and have a complete brief to Codex. While both are near their limits and Codex can still take work, the limit rule moves nothing: each task takes its normal route. While Claude usage is high and Codex has no capacity, the hook picks no model above Sonnet. The main session tells the user in one sentence when a worker reports such a switch."
     : "- All delegated work runs on Claude workers. The hook sends no task to Codex, also when Claude usage is high. While Claude usage is high, the hook picks no model above Sonnet.";
 
   const keepLineFact =
@@ -127,6 +130,28 @@ function main() {
   // A notice for the user needs the JSON form, because only `systemMessage` reaches
   // the user. Without a notice, plain text is enough.
   const notices = [];
+  // Jev on but no key: every dispatch passes unchanged, and before this notice
+  // nothing said so (five days in September 2026). In mode "off" the route hook
+  // returns before it looks for a key, so the key is not the reason there.
+  if (jevOn && config.mode !== "off" && !findApiKey().key && firstNotice(input?.session_id ?? null, "jev_no_key")) {
+    notices.push(noKeyNotice());
+  }
+  // While the triage collects an evaluation window, its progress (and the day-7
+  // tripwire) shows once per calendar day, for all sessions together. After the
+  // window ends, the line says what to run next; after the score, it is gone.
+  if (config.triageMode === "log") {
+    // A damaged labels file must cost only this line, not the session's facts.
+    let triage = null;
+    try {
+      triage = statusLine();
+    } catch (error) {
+      process.stderr.write(`subagent-router: the triage status could not be read: ${error?.message ?? error}\n`);
+      appendLog({ ts: new Date().toISOString(), event: "hook_error", hook: "session-start", error: `triage status: ${String(error?.message ?? error)}` });
+    }
+    if (triage && firstNotice("triage-status", `triage_status_${new Date().toISOString().slice(0, 10)}`)) {
+      notices.push(triage);
+    }
+  }
   if (config.mode === "enforce") {
     const codex = codexState(config);
     // Off is the user's own choice, not a switch, so it gets no notice at each start.
@@ -137,14 +162,20 @@ function main() {
     // The usage rules act through the routing table, which needs Jev. With Jev
     // off nothing moves, so a notice that says work now moves would be wrong.
     if (jevOn && claude.tight) {
-      // The hook moves work to Codex only while Codex can take it. Otherwise it lowers the biggest model.
-      notices.push(codex.available ? claudeNotice(claude) : claudeCapNotice(claude));
+      // The hook moves work to Codex only while Codex can take it and is not near
+      // its own limit. It lowers the biggest model only while Codex cannot take work.
+      // With Codex available but near its limit, it does neither.
+      notices.push(!codex.available ? claudeCapNotice(claude) : codex.tight ? claudeAndCodexTightNotice(claude, codex) : claudeNotice(claude));
     }
     // The hook starts again on a resume or a compaction of the same session, so
     // this notice is shown once per session, like the notices of the route hook.
     const blind = jevOn ? limitsBlindNotice(claude, config) : null;
     if (blind && firstNotice(input?.session_id ?? null, "limits_blind")) {
       notices.push(blind);
+    }
+    const missing = jevOn ? limitsMissingNotice(claude) : null;
+    if (missing && firstNotice(input?.session_id ?? null, "limits_missing")) {
+      notices.push(missing);
     }
   }
   if (notices.length === 0) {
@@ -158,6 +189,20 @@ function main() {
       })
     );
   }
+}
+
+// A plugin started from a folder (--plugin-dir, or passed by an app through the
+// Agent SDK) runs as a session-only "@inline" copy, and such a copy gets no
+// plugin options, so the key never reaches it.
+function noKeyNotice() {
+  const cache = path.join(os.homedir(), ".claude", "plugins", "cache");
+  const inline = !path.resolve(process.env.CLAUDE_PLUGIN_ROOT ?? "").startsWith(cache);
+  return (
+    "Jev is on, but no TypeSafe key reached the hooks, so every dispatch passes unchanged." +
+    (inline
+      ? ' This plugin runs as a session-only copy (loaded from a folder), which gets no plugin options. If the plugin is also installed, set "subagent-router@inline": false under enabledPlugins in your settings, so the installed copy, which gets the key, loads instead.'
+      : " Set the plugin option typesafe_api_key, or the variable TYPESAFE_API_KEY.")
+  );
 }
 
 try {

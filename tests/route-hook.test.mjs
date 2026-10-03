@@ -746,7 +746,7 @@ test("a direct call to a Codex worker falls back to Claude, and the user is told
     const first = JSON.parse((await runNode(HOOK, { stdin: JSON.stringify(call), env })).stdout);
     assert.deepEqual([first.hookSpecificOutput.updatedInput.subagent_type, first.hookSpecificOutput.updatedInput.model], ["subagent-router:implementer", "sonnet"]);
     assert.equal(first.hookSpecificOutput.updatedInput.prompt, call.tool_input.prompt, "a Claude worker gets the real task text");
-    assert.match(first.systemMessage, /weekly Codex allowance[\s\S]*run on Claude workers/);
+    assert.match(first.systemMessage, /A Codex plan window of the ChatGPT plan is used up[\s\S]*run on Claude workers/);
     assert.match(first.hookSpecificOutput.additionalContext, /codex_plan_used_up/);
 
     const second = JSON.parse((await runNode(HOOK, { stdin: JSON.stringify({ ...call, tool_use_id: "toolu_2" }), env })).stdout);

@@ -42,8 +42,8 @@ export const DEFAULT_ARMS = ["off", "sonnet", "shadow", "jev"];
 export const EFFORT_ARMS = ["low", "medium"];
 
 const TASK_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const TASK_FIELDS = ["model", "budgetUsd", "timeoutS", "allowedTools", "export", "expect", "expectRoute", "verify"];
-const DEFAULTS = { model: "sonnet", budgetUsd: 1, timeoutS: 600, allowedTools: ["Read", "Glob", "Grep", "Agent"], export: false };
+const TASK_FIELDS = ["model", "budgetUsd", "timeoutS", "allowedTools", "export", "history", "expect", "expectRoute", "verify"];
+const DEFAULTS = { model: "sonnet", budgetUsd: 1, timeoutS: 600, allowedTools: ["Read", "Glob", "Grep", "Agent"], export: false, history: false };
 // The switches that an arm sets. They are removed from the parent environment
 // first, so a value from the shell never reaches the wrong arm. The forced
 // subagent model must stay off in the plugin arms: with it the hook cannot set a model.
@@ -141,6 +141,24 @@ function checkExpectRoute(route, task) {
   }
 }
 
+// A task with `history` runs in a clone of its repository, and a clone starts at
+// the top folder. A cwd below it fails only at run time, after earlier tasks may
+// have run and cost money, so the loader refuses it first. `--show-prefix`
+// prints the path from the top folder to cwd. It is empty at the top folder and
+// in a bare repository.
+function checkHistoryRoot(cwd, task) {
+  let prefix;
+  try {
+    prefix = execFileSync("git", ["-C", cwd, "rev-parse", "--show-prefix"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  } catch (error) {
+    const said = String(error.stderr ?? "").trim().split("\n")[0];
+    throw new Error(`task "${task}": history needs cwd to be a git repository${said ? ` (git says: ${said})` : ""}`);
+  }
+  if (prefix !== "") {
+    throw new Error(`task "${task}": history needs cwd to be the top folder of its git repository (it is inside ${prefix})`);
+  }
+}
+
 // Reads a task set file: { model?, budgetUsd?, timeoutS?, allowedTools?, export?,
 // tasks: [{ name, prompt, cwd, ...the same fields }] }. Task fields win over the
 // file's defaults, and the file's defaults over the built-in ones. A relative
@@ -191,6 +209,11 @@ export function loadTaskSet(file) {
     if (typeof merged.export !== "boolean") {
       throw new Error(`task "${name}": "export" must be true or false`);
     }
+    if (typeof merged.history !== "boolean") {
+      throw new Error(`task "${name}": "history" must be true or false`);
+    }
+    if (merged.history && !merged.export) throw new Error(`task "${name}": history requires export: true`);
+    if (merged.history) checkHistoryRoot(cwd, name);
     checkExpect(merged.expect, name);
     checkExpectRoute(merged.expectRoute, name);
     merged.verify = loadVerification(merged.verify, path.dirname(file), cwd);
@@ -256,14 +279,75 @@ export function prepareDataDir(dataDir, configFile = null) {
   }
 }
 
+// The folders in which Claude Code never lets a session write in dontAsk mode,
+// whatever the allow rules say (its permission-modes page, section "Protected
+// paths", read 2026-10-02). An editing task whose workspace lies inside one can
+// never write a file, so the runner refuses such a folder before any run.
+const PROTECTED_SEGMENTS = new Set([".git", ".vscode", ".idea", ".husky", ".cargo", ".devcontainer", ".yarn", ".mvn"]);
+
+// The real location of a folder that may not exist yet: its nearest existing
+// parent, resolved through symbolic links, with the rest of the path appended.
+export function realLocation(dir) {
+  let current = path.resolve(dir);
+  const rest = [];
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    rest.unshift(path.basename(current));
+    current = parent;
+  }
+  return path.join(fs.realpathSync(current), ...rest);
+}
+
+// Why Claude Code would refuse writes in this folder in dontAsk mode, or null.
+// `.claude/worktrees` is the one exception, and it does not cover a protected
+// folder nested deeper inside it.
+export function protectedReason(dir, { pluginDir = null } = {}) {
+  const resolved = realLocation(dir);
+  if (pluginDir) {
+    const plugin = realLocation(pluginDir);
+    if (resolved === plugin || resolved.startsWith(`${plugin}${path.sep}`)) return `it lies inside the plugin folder ${plugin}, which --plugin-dir loads`;
+  }
+  const parts = resolved.split(path.sep);
+  for (let index = 0; index < parts.length; index += 1) {
+    if (PROTECTED_SEGMENTS.has(parts[index])) return `it lies inside a ${parts[index]} folder`;
+    if (parts[index] === ".config" && parts[index + 1] === "git") return "it lies inside .config/git";
+    if (parts[index] === ".claude" && parts[index + 1] !== "worktrees") return "it lies inside a .claude folder";
+  }
+  return null;
+}
+
 // A fresh copy of the committed tree of a git repository, for a task that
-// writes files. The copy has no git history.
-export function exportWorkspace(repoDir, dest, revision = "HEAD") {
+// writes files. The copy has no git history, unless `history` is set: a review
+// task needs the base and change commits, so it gets a clone pinned to the
+// revision, without a remote that points back at the fixture.
+export function exportWorkspace(repoDir, dest, revision = "HEAD", { history = false } = {}) {
   // This copy belongs to one run alone. An earlier run at the same task, arm and
   // number left its whole working tree here, including anything it wrote, and
   // `tar` would unpack over it rather than replace it. A file the earlier run
   // created and this commit no longer has would survive into the new run.
   fs.rmSync(dest, { recursive: true, force: true });
+  if (history) {
+    // --no-local copies objects through git's transport, so the copy has no hard
+    // links (the grader's snapshot refuses them) and no alternates file.
+    const opts = { stdio: ["ignore", "ignore", "pipe"] };
+    execFileSync("git", ["clone", "--quiet", "--no-local", "--no-checkout", repoDir, dest], opts);
+    execFileSync("git", ["-C", dest, "checkout", "--quiet", "-B", "review", revision], opts);
+    execFileSync("git", ["-C", dest, "remote", "remove", "origin"], opts);
+    // The clone also made a branch for the fixture's default branch, and copied
+    // its tags. Commits after the pinned revision would stay reachable through
+    // them, so only the "review" branch may remain. Deleting the refs is not
+    // enough. The HEAD reflog still names the later tip and the fixture's path,
+    // and the copied objects still hold every later commit, which a worker can
+    // read by its id. So the reflogs are emptied and the objects that no ref
+    // reaches are removed. The repack writes new pack files, not hard links.
+    const refs = execFileSync("git", ["-C", dest, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags"], { encoding: "utf8" })
+      .split("\n").filter((ref) => ref && ref !== "refs/heads/review");
+    for (const ref of refs) execFileSync("git", ["-C", dest, "update-ref", "-d", ref], opts);
+    execFileSync("git", ["-C", dest, "reflog", "expire", "--expire=now", "--all"], opts);
+    execFileSync("git", ["-C", dest, "gc", "--prune=now", "--quiet"], opts);
+    return dest;
+  }
   fs.mkdirSync(dest, { recursive: true });
   const tarFile = path.join(path.dirname(dest), `${path.basename(dest)}.tar`);
   execFileSync("git", ["-C", repoDir, "archive", "--format=tar", "-o", tarFile, revision], { stdio: ["ignore", "ignore", "pipe"] });
@@ -412,9 +496,6 @@ export function armEnforces(arm) {
   return ARMS[arm]?.env?.ORCH_MODE === "enforce";
 }
 
-// Grades one saved record against its task. It reads the record only, so a
-// changed grader can be run again over saved runs without spending anything.
-// A run that errored or timed out is not scored: it has no answer to grade.
 // When the hook agrees with a worker's own model, it sets no model, and
 // `final.model` stays null. The model that ran is then only in the `launched`
 // record, as a full id such as `claude-haiku-4-5-20251001`.
@@ -426,6 +507,12 @@ function modelMatches(dispatch, expected) {
   return typeof dispatch.resolved_model === "string" && dispatch.resolved_model.includes(expected);
 }
 
+// Grades one saved record against its task. It reads the record only, so a
+// changed grader can be run again over saved runs without spending anything.
+// In a task without `verify`, a run that errored or timed out is not scored: it
+// has no answer to grade. A task with `verify` checks the workspace, which
+// exists either way, so it scores every run, and an errored or timed-out run
+// fails there.
 export function gradeRecord(record, task) {
   const graders = [];
   const answer = typeof record.result === "string" ? record.result : "";
@@ -717,13 +804,16 @@ export function checkPassRule(summary, { minRuns = MIN_RUNS_PER_ARM, maxCacheRat
       out[taskName] = { verdict: "NOT DECIDED", reasons: ["the run needs both the jev arm and the sonnet arm"] };
       continue;
     }
-    // A run only counts once a grader could read it. A run that errored, timed
-    // out or came back cut off is not graded, so counting it as evidence would
-    // let an arm that mostly failed look like an arm that mostly worked.
+    // A run only counts once a grader could read it. In a task without `verify`,
+    // a run that errored, timed out or came back cut off is not graded, so
+    // counting it as evidence would let an arm that mostly failed look like an
+    // arm that mostly worked. A task with `verify` grades every run, and an
+    // errored or timed-out run fails there. The summary does not say which kind
+    // of task it holds, so the reason names both.
     const blockers = [];
     if (jev.graded < minRuns || baseline.graded < minRuns) {
       blockers.push(
-        `fewer than ${minRuns} graded runs per arm (jev ${jev.graded} of ${jev.runs}, sonnet ${baseline.graded} of ${baseline.runs}); a run that errored, timed out or was cut off cannot be graded`
+        `fewer than ${minRuns} graded runs per arm (jev ${jev.graded} of ${jev.runs}, sonnet ${baseline.graded} of ${baseline.runs}); a task without \`verify\` does not grade a run that errored, timed out or was cut off; a task with \`verify\` grades every run, and an errored or timed-out run fails`
       );
     }
     const ratio = cacheRatio(jev.cache_created_mean, baseline.cache_created_mean);

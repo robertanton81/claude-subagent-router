@@ -9,14 +9,20 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { CODEX_JOB_KIND, DEFAULTS, DEFAULT_MODEL, REVIEWER_SET, WRITER_FAMILY, currentAgentName, dataDir } from "./config.mjs";
+import { CODEX_JOB_KIND, DEFAULTS, DEFAULT_MODEL, REVIEWER_SET, WORKERS, WRITER_FAMILY, currentAgentName, dataDir } from "./config.mjs";
 import { countFindings, reportsNoWrite, verificationText } from "./findings.mjs";
+import { poolOf } from "./pools.mjs";
+import { loadDoneResults } from "./triage-state.mjs";
 import { logFile, rotatedLogFile } from "./log.mjs";
 import { FIVE_HOURS_MS, SEVEN_DAYS_MS, windowVerdict } from "./provider-state.mjs";
 
 const MODEL_RANK = { haiku: 1, sonnet: 2, opus: 3, fable: 4 };
 const CHANGED_ACTIONS = new Set(["rewrite", "redirect", "fallback"]);
-const FAILED_VERIFICATION = /\b(fail|failed|failing|error|errors|exit code [1-9][0-9]*|exit [1-9][0-9]*)\b/i;
+const FAILED_VERIFICATION = /\b(fail|failed|failing|failures?|errors?|exit code [1-9][0-9]*|exit [1-9][0-9]*)\b/i;
+// A count of zero is a pass, as in "4 passed, 0 failed" or node's "fail 0". Only
+// these phrases are removed before the search, so a real failure on the same
+// line, as in "0 failed; build: exit code 1", still counts.
+const ZERO_COUNT = /\b0\s+(?:fail|failed|failures?|errors?)\b|\b(?:fail|failed|failures?|errors?)\s*:?\s*0\b/gi;
 const NOT_RUN = /\bnot run\b/i;
 
 // ---- Reading ----
@@ -52,7 +58,7 @@ export function loadStore(env = process.env) {
     { name: "dispatch-log.jsonl", file: logFile(env), kind: "log" },
     { name: "limits.jsonl", file: path.join(dir, "limits.jsonl"), kind: "limits" }
   ];
-  const store = { dataDir: dir, files: [], log: [], limits: [] };
+  const store = { dataDir: dir, files: [], log: [], limits: [], triage: loadDoneResults(env) };
   for (const entry of files) {
     const read = readJsonLines(entry.file);
     store.files.push({ name: entry.name, exists: read.exists, lines: read.records.length, broken: read.broken });
@@ -154,6 +160,34 @@ function withCurrentAgentNames(record) {
     }
   }
   return copy;
+}
+
+// One summary per report_id: the done files are the source of truth, and a
+// repeated log record must never count twice.
+// Besides the counts, the distinct change groups that an evaluation could draw:
+// eligible, in the evaluation pool, with at least one finding whose excerpt was
+// read. This is the rate that decides how long an evaluation window must be,
+// and it is known before any window is registered.
+function summarizeTriage(results) {
+  const seen = new Set();
+  const groups = new Set();
+  const summary = { reports: 0, parseStates: {}, outcomes: {}, evaluationGroups: 0 };
+  for (const result of results) {
+    if (!result?.report_id || seen.has(result.report_id)) continue;
+    seen.add(result.report_id);
+    summary.reports += 1;
+    const state = result.parse?.state ?? "unknown";
+    summary.parseStates[state] = (summary.parseStates[state] ?? 0) + 1;
+    for (const finding of result.findings ?? []) {
+      summary.outcomes[finding.outcome] = (summary.outcomes[finding.outcome] ?? 0) + 1;
+    }
+    const usable = (result.findings ?? []).some((finding) => finding.citation && typeof finding.excerpt === "string");
+    if (result.group_eligible === true && usable && poolOf(result.change_group) === "evaluation") {
+      groups.add(result.change_group);
+    }
+  }
+  summary.evaluationGroups = groups.size;
+  return summary;
 }
 
 export function buildReport(store, options = {}) {
@@ -414,7 +448,7 @@ export function buildReport(store, options = {}) {
     }
     if (NOT_RUN.test(verification)) {
       underRouting.verificationNotRun += 1;
-    } else if (FAILED_VERIFICATION.test(verification)) {
+    } else if (FAILED_VERIFICATION.test(verification.replace(ZERO_COUNT, ""))) {
       underRouting.verificationFailed += 1;
     }
   }
@@ -456,12 +490,36 @@ export function buildReport(store, options = {}) {
     list.push({ ts: timeOf(record) ?? 0, family });
     authorsBySession.set(record.session_id, list);
   }
+  // Since 2026-09-30 the triage hook records a Codex review's counts from the
+  // job's own result.md. That record wins over the stop record, whose count
+  // came from the wrapper's paraphrase. "unavailable" stays unknown: it is
+  // never counted as a review with zero findings.
+  const reviewFindingsOfAgent = new Map();
+  for (const record of store.log) {
+    if (record.event === "review_findings" && record.agent_id) {
+      reviewFindingsOfAgent.set(record.agent_id, record);
+    }
+  }
   const findings = {};
+  let findingsUnknown = 0;
+  // Why each unknown count is unknown. The record's reason names a failed job
+  // (exit_N), an empty or unparsed result, or a result that was not found. A
+  // stop without any record is "no count record": a Codex review logged before
+  // these records existed, or one whose triage hook did not run.
+  const findingsUnknownByReason = {};
   for (const [agentId, stop] of stopOfAgent) {
     if (!REVIEWER_SET.has(stop.agent_type)) {
       continue;
     }
-    const counts = stop.findings && typeof stop.findings === "object" ? stop.findings : countFindings(stop.result);
+    const recorded = reviewFindingsOfAgent.get(agentId);
+    // A Codex reviewer's own summary is a paraphrase without reliable tags, so
+    // without a count from the job's result the review is unknown, never zero.
+    if ((recorded && recorded.source !== "codex_result") || (!recorded && stop.agent_type === WORKERS.codexReviewer)) {
+      findingsUnknown += 1;
+      count(findingsUnknownByReason, recorded ? (recorded.reason ?? recorded.source) : "no count record");
+      continue;
+    }
+    const counts = recorded?.counts ?? (stop.findings && typeof stop.findings === "object" ? stop.findings : countFindings(stop.result));
     const dispatch = dispatchOfToolUse.get(toolUseOfAgent.get(agentId));
     const reviewMs = dispatch ? timeOf(dispatch) : timeOf(stop);
     let family = "unknown";
@@ -572,6 +630,10 @@ export function buildReport(store, options = {}) {
     underRouting,
     durations,
     findings,
+    findingsUnknown,
+    findingsUnknownByReason,
+    // The done files carry ts and cwd like log lines, so the same filters apply.
+    triage: summarizeTriage((store.triage ?? []).filter(keepRecord)),
     claudeUsage: usage
   };
 }
@@ -593,12 +655,13 @@ function seconds(ms) {
 
 export function renderText(report) {
   const lines = [];
-  const { store, dispatches, jev, underRouting, durations, findings, claudeUsage } = report;
+  const { store, dispatches, jev, underRouting, durations, findings, findingsUnknown, findingsUnknownByReason, triage, claudeUsage } = report;
   lines.push(`Store: ${store.dataDir}`);
   for (const file of store.files) {
     lines.push(`  ${file.name}: ${file.exists ? `records ${file.lines}${file.broken > 0 ? `, broken lines skipped ${file.broken}` : ""}` : "not there"}`);
   }
-  if (store.records === 0 && claudeUsage.samples === 0) {
+  // Triage results live in their own files, so they count even with no log records.
+  if (store.records === 0 && claudeUsage.samples === 0 && triage.reports === 0) {
     lines.push("No records.");
     return `${lines.join("\n")}\n`;
   }
@@ -653,6 +716,12 @@ export function renderText(report) {
     const f = findings[family];
     lines.push(`  ${family}: ${f.reviews} reviews, P0 ${f.P0}, P1 ${f.P1}, P2 ${f.P2}, P3 ${f.P3}`);
   }
+  if (findingsUnknown > 0) {
+    lines.push(`  reviews whose counts are unknown: ${findingsUnknown} (${pairs(findingsUnknownByReason ?? {})})`);
+  }
+  lines.push("");
+  const pairsOf = (map) => Object.entries(map).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k} ${v}`).join(", ") || "none";
+  lines.push(`Finding triage: ${triage.reports} reports, ${triage.evaluationGroups} eligible change groups in the evaluation pool. Parse states: ${pairsOf(triage.parseStates)}. Outcomes: ${pairsOf(triage.outcomes)}`);
   lines.push("");
   lines.push(`Claude usage: ${claudeUsage.samples} samples${claudeUsage.samples > 0 ? ` from ${new Date(claudeUsage.firstTs).toISOString()} to ${new Date(claudeUsage.lastTs).toISOString()}` : ""}, ${claudeUsage.withResetTimes} with reset times`);
   for (const [name, label] of [["fiveHour", "5-hour"], ["sevenDay", "7-day"]]) {

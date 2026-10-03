@@ -1,4 +1,4 @@
-import { VERIFICATION_OUTCOMES, buildRequest, buildVerificationRequest } from "./questions.mjs";
+import { TRIAGE_OUTCOMES, VERIFICATION_OUTCOMES, buildRequest, buildVerificationRequest } from "./questions.mjs";
 
 // An error with a short code that is safe to log. It never holds the key.
 export class JevError extends Error {
@@ -126,4 +126,18 @@ export async function askVerification(text, config, key, timeoutMs) {
     throw new JevError("bad_response", "the outcome answer is missing or not a known outcome");
   }
   return { outcome: answer.choice, confidence: answer.confidence, latencyMs, usage: body.usage ?? null, model: body.model ?? null };
+}
+
+// Returns { answers: { finding_n: { choice, confidence, probabilities } | { error } },
+// latencyMs, usage, model }. Throws a JevError when the whole call fails.
+export async function askTriage(request, config, key, timeoutMs) {
+  const { body, latencyMs } = await postJev(request, config, key, timeoutMs);
+  const answers = {};
+  for (const id of Object.keys(request.questions)) {
+    const answer = body?.answers?.[id];
+    answers[id] = TRIAGE_OUTCOMES.includes(answer?.choice) && isNumber(answer?.confidence)
+      ? { choice: answer.choice, confidence: answer.confidence, probabilities: answer.probabilities ?? null }
+      : { error: "bad_answer" };
+  }
+  return { answers, latencyMs, usage: body.usage ?? null, model: body.model ?? null };
 }

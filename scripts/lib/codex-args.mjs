@@ -5,15 +5,17 @@ export const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhi
 
 export const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 export const BRANCH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
-export const COMMIT_PATTERN = /^[0-9a-fA-F]{7,40}$/;
+// SHA-1 ids have 40 hex characters, SHA-256 ids 64.
+export const COMMIT_PATTERN = /^[0-9a-fA-F]{7,64}$/;
 
 export const RESULT_CONTRACT = [
   "",
   "---",
-  "When you finish, answer in exactly this format:",
+  "When you finish, end your answer with these lines:",
   "Changed files: <list of paths, or \"none\">",
-  "Verification: <the command you ran and its result, or \"not run\" with the reason>",
+  "Verification: <the command you ran and its final result, or \"not run\" with the reason; runs that failed before your change do not go here>",
   "Open problems: <list, or \"none\">",
+  "If the task above asks for more lines, such as Reproduction: and Cause:, put them after Open problems.",
   ""
 ].join("\n");
 
@@ -28,7 +30,7 @@ export const REVIEW_CONTRACT = [
   "---",
   FINAL_MESSAGE_RULE,
   "If the task above names an answer format, use it. Otherwise list the findings, the most severe first. Give each finding the file and line, what goes wrong and when, and a small fix. End with one line that says whether the change is correct.",
-  "In every format, tag each finding with its priority: [P0] must be fixed at once, [P1] before the merge, [P2] soon, [P3] minor. Say plainly when you found nothing.",
+  "In every format, tag each new finding with its priority by the harm it causes: [P0] breaks the build or loses data, [P1] a bug that users will hit, [P2] a bug in a rare case, [P3] a minor problem. A finding that the task above lists as already known goes on one line under Known:, without a tag. Say plainly when you found nothing.",
   ""
 ].join("\n");
 
@@ -88,7 +90,7 @@ export function parseOptions(argv) {
       case "--commit": {
         const sha = next();
         if (!COMMIT_PATTERN.test(sha)) {
-          throw new UsageError("--commit must be a commit hash of 7 to 40 hex characters");
+          throw new UsageError("--commit must be a commit hash of 7 to 64 hex characters");
         }
         options.scope = { type: "commit", value: sha };
         break;

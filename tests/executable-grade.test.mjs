@@ -5,7 +5,7 @@ import path from "node:path";
 import net from "node:net";
 import { test } from "node:test";
 import { boundaryCommand, checkBoundary, gradingEnvironment, nodeRuntimeDirectory, wrapInvocation } from "../scripts/lib/execution-boundary.mjs";
-import { loadVerification, prepareVerification, snapshotTree, verifyWorkspace } from "../scripts/lib/executable-grade.mjs";
+import { boundWorker, loadVerification, prepareVerification, snapshotTree, verifyWorkspace } from "../scripts/lib/executable-grade.mjs";
 import { exportWorkspace, gradeRecord, loadTaskSet, makeRecord, runOne } from "../scripts/lib/eval.mjs";
 import { cleanEnv, makeTempDir, runNode } from "./helpers.mjs";
 
@@ -52,10 +52,56 @@ test("executable grading rejects unsafe definitions and fingerprints file conten
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("a task with verify scores an errored or timed-out run, and the run fails", () => {
+  // The workspace exists whether or not the worker finished, so a task with
+  // `verify` grades every run. A run that errored or timed out is a failure,
+  // not a run left out of the pass rate. This needs no OS boundary: the
+  // fixture only loads the verification definition.
+  const f = fixture();
+  try {
+    const completed = (graded) => graded.graders.find((grader) => grader.name === "worker.completed");
+    for (const [label, outcome] of [["an errored", { is_error: true }], ["a timed-out", { timed_out: true }]]) {
+      const graded = gradeRecord({ cwd: f.workspace, result: "", is_error: false, timed_out: false, ...outcome }, f.task);
+      assert.equal(graded.scored, true, `${label} run is scored`);
+      assert.equal(graded.pass, false, `${label} run fails`);
+      assert.equal(completed(graded)?.pass, false, `the worker.completed grader fails ${label} run`);
+    }
+    const clean = gradeRecord({ cwd: f.workspace, result: "done", is_error: false, timed_out: false }, f.task);
+    assert.equal(completed(clean)?.pass, true, "the worker.completed grader passes a run that completed");
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("unsupported boundaries fail closed and grading drops inherited credentials and runtime injection", () => {
   assert.throws(() => boundaryCommand([process.execPath], { platform: "unsupported" }), /no execution boundary/);
   assert.deepEqual(gradingEnvironment("/scratch", { PATH: "/bin", SECRET: "test-key-not-a-secret", NODE_OPTIONS: "--require=hostile", HOME: "/real" }),
     { PATH: "/bin", HOME: "/scratch", TMPDIR: "/scratch", TMP: "/scratch", TEMP: "/scratch", LANG: "C", LC_ALL: "C" });
+});
+
+test("a bounded worker keeps Claude Code's own temp files inside its scratch folder", () => {
+  // Claude Code writes its internal temp files, the Bash tool's included, under
+  // CLAUDE_CODE_TMPDIR (default /tmp/claude-<uid>/ on macOS). The boundary allows
+  // writes only to the workspace, the data folder and the scratch folder, so
+  // without this every shell command of the worker failed with EPERM.
+  const root = fs.realpathSync(makeTempDir("orch-bound-"));
+  try {
+    const [workspace, data, scratch, empty] = ["workspace", "data", "scratch", "empty"].map((name) => {
+      fs.mkdirSync(path.join(root, name));
+      return path.join(root, name);
+    });
+    const invocation = {
+      argv: [process.execPath, "-e", "0"],
+      cwd: workspace,
+      env: { PATH: "/bin", HOME: "/home/user", CLAUDE_CODE_TMPDIR: "/tmp", SECRET: "test-key-not-a-secret" }
+    };
+    const prepared = { scratch, workerOptions: { writable: [workspace, data, scratch], deniedReads: [], emptyDirectory: empty, network: true, platform: "darwin" } };
+    const bound = boundWorker(invocation, prepared);
+    assert.equal(bound.env.CLAUDE_CODE_TMPDIR, scratch, "Claude Code's temp folder is the scratch folder, not the inherited /tmp");
+    assert.equal(bound.env.TMPDIR, scratch);
+    assert.equal(bound.env.SECRET, undefined, "unrelated credentials are still dropped");
+    assert.ok(bound.argv.join("\n").includes(`(allow file-write* (subpath ${JSON.stringify(scratch)}))`), "the boundary allows writes to that folder");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("real OS boundary protects grading assets; unavailable boundaries refuse before any worker", async (t) => {
@@ -210,6 +256,98 @@ process.stdout.write(JSON.stringify({result:'tests passed',is_error:false,total_
     const pinnedCopy = exportWorkspace(f.workspace, path.join(f.root, "pinned-copy"), originalRevision);
     assert.equal(fs.readFileSync(path.join(pinnedCopy, "answer.txt"), "utf8"), "wrong");
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("a task with history gets a workspace with the fixture's commits, pinned to the revision", () => {
+  // A review task needs a base commit and a change commit; a plain export keeps
+  // only the files of one commit.
+  const root = fs.realpathSync(makeTempDir("orch-history-"));
+  try {
+    const repo = path.join(root, "repo");
+    fs.mkdirSync(repo);
+    const git = (...args) => execFileSync("git", ["-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", ...args], { encoding: "utf8" }).trim();
+    git("init", "-q");
+    fs.writeFileSync(path.join(repo, "a.txt"), "base");
+    git("add", ".");
+    git("commit", "-qm", "base");
+    fs.writeFileSync(path.join(repo, "a.txt"), "change");
+    git("commit", "-qam", "change");
+    const pinned = git("rev-parse", "HEAD");
+    git("tag", "pinned-tag");
+    fs.writeFileSync(path.join(repo, "a.txt"), "later");
+    git("commit", "-qam", "later");
+    const later = git("rev-parse", "HEAD");
+    git("tag", "later-tag");
+    // A side branch with a commit of its own, which the pinned revision does not
+    // contain either.
+    git("checkout", "-q", "-b", "side", pinned);
+    fs.writeFileSync(path.join(repo, "side.txt"), "side");
+    git("add", ".");
+    git("commit", "-qm", "side");
+    const side = git("rev-parse", "HEAD");
+    git("checkout", "-q", "-");
+
+    const withHistory = exportWorkspace(repo, path.join(root, "with"), pinned, { history: true });
+    const inCopy = (...args) => execFileSync("git", ["-C", withHistory, ...args], { encoding: "utf8" }).trim();
+    assert.deepEqual(inCopy("log", "--format=%s").split("\n"), ["change", "base"], "the workspace holds the commits up to the pinned revision");
+    assert.deepEqual(inCopy("log", "--all", "--format=%s").split("\n"), ["change", "base"], "no branch or tag keeps a later commit reachable");
+    assert.equal(inCopy("for-each-ref", "--format=%(refname)"), "refs/heads/review", "only the review branch remains");
+    // Deleting the refs is not enough: a worker could still read a later commit
+    // by its id, and the reflog names the later tip and the fixture's path.
+    for (const [label, id] of [["later", later], ["side", side]]) {
+      assert.throws(() => execFileSync("git", ["-C", withHistory, "cat-file", "-e", id], { stdio: "ignore" }), undefined, `the ${label} commit is not in the copy`);
+    }
+    assert.deepEqual(inCopy("log", "--all", "--reflog", "--format=%s").split("\n"), ["change", "base"], "no reflog keeps a later commit reachable");
+    assert.ok(!inCopy("reflog").includes(repo), "the reflog does not name the fixture's path");
+    const commits = inCopy("cat-file", "--batch-all-objects", "--batch-check").split("\n").filter((line) => line.split(" ")[1] === "commit");
+    assert.equal(commits.length, 2, `the copy holds only the base and change commits: ${commits.join(", ")}`);
+    assert.equal(fs.readFileSync(path.join(withHistory, "a.txt"), "utf8"), "change");
+    assert.equal(inCopy("remote"), "", "no remote points back at the fixture");
+    assert.equal(fs.existsSync(path.join(withHistory, ".git", "objects", "info", "alternates")), false, "the objects do not point back at the fixture");
+    // The snapshot of the grader refuses hard links, so the copy must have none.
+    assert.doesNotThrow(() => snapshotTree(withHistory));
+
+    const plain = exportWorkspace(repo, path.join(root, "plain"), pinned);
+    assert.equal(fs.existsSync(path.join(plain, ".git")), false, "a plain export still has no history");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the task loader accepts history only as true or false, and only with export", () => {
+  const root = fs.realpathSync(makeTempDir("orch-history-load-"));
+  const outside = fs.realpathSync(makeTempDir("orch-history-norepo-"));
+  try {
+    // The clone of a history task starts at the top folder of the repository, so
+    // the loader accepts history only for a cwd that is that top folder.
+    execFileSync("git", ["init", "-q", root]);
+    const taskFile = path.join(root, "tasks.json");
+    const write = (body) => fs.writeFileSync(taskFile, JSON.stringify(body));
+    write({ tasks: [{ name: "review", prompt: "review", cwd: root, export: true, history: true }] });
+    assert.equal(loadTaskSet(taskFile).tasks[0].history, true);
+    write({ export: true, history: true, tasks: [{ name: "review", prompt: "review", cwd: root }] });
+    assert.equal(loadTaskSet(taskFile).tasks[0].history, true, "a file-level default is inherited");
+    write({ tasks: [{ name: "plain", prompt: "x", cwd: root }] });
+    assert.equal(loadTaskSet(taskFile).tasks[0].history, false, "history is off by default");
+    write({ tasks: [{ name: "review", prompt: "review", cwd: root, history: true }] });
+    assert.throws(() => loadTaskSet(taskFile), /history requires export/);
+    write({ tasks: [{ name: "review", prompt: "review", cwd: root, export: true, history: "yes" }] });
+    assert.throws(() => loadTaskSet(taskFile), /"history" must be true or false/);
+
+    // A subfolder works for a plain export, but a history task would fail only
+    // at run time, after earlier tasks had run. The loader refuses it first.
+    const sub = path.join(root, "sub");
+    fs.mkdirSync(sub);
+    write({ tasks: [{ name: "plain", prompt: "x", cwd: sub, export: true }] });
+    assert.equal(loadTaskSet(taskFile).tasks[0].history, false, "a plain export of a subfolder is still accepted");
+    write({ tasks: [{ name: "review", prompt: "review", cwd: sub, export: true, history: true }] });
+    assert.throws(() => loadTaskSet(taskFile), /task "review": history needs cwd to be the top folder of its git repository \(it is inside sub\/\)/);
+    write({ tasks: [{ name: "review", prompt: "review", cwd: outside, export: true, history: true }] });
+    assert.throws(() => loadTaskSet(taskFile), /task "review": history needs cwd to be a git repository/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
 });
 
 test("evaluation child output is bounded and its failure is recorded", async () => {

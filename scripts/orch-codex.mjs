@@ -36,6 +36,9 @@ import { readLimitsOfThread } from "./lib/codex-limits.mjs";
 import { REQUEST_ID_PATTERN, claimRequest, recordJobOfRequest, restoreRequest } from "./lib/codex-request.mjs";
 import { dataDir, loadConfig } from "./lib/config.mjs";
 import { ensurePrivateDir } from "./lib/log.mjs";
+import { resolveCommitWithReason, worktreeDirty } from "./lib/evidence.mjs";
+import { removeSweepSince, sharedEnv, sweepSince } from "./lib/sweep.mjs";
+import { triageOn } from "./lib/triage-core.mjs";
 import { codexPlatformSupported } from "./lib/provider-state.mjs";
 import {
   UNKNOWN_WRITER,
@@ -116,7 +119,42 @@ function busyText(holder, cwd) {
   return `the Codex job ${holder} is still changing files in ${cwd}. Wait for it with "wait ${holder}" or stop it with "cancel ${holder}"`;
 }
 
-function startJob({ kind, model, effort, scope, brief, cwd }) {
+// Where a review came from and which code it saw, written before the runner
+// starts. The finding triage reads it later to tell the reviewed code from code
+// that changed since; a lookup that fails leaves null and never stops the job.
+function provenanceOf({ kind, scope, cwd, origin, requestId }) {
+  const head = resolveCommitWithReason(cwd, "HEAD");
+  const scoped = kind === "review" && (scope?.type === "commit" || scope?.type === "base") ? resolveCommitWithReason(cwd, scope.value) : { id: null, error: null };
+  return {
+    provenance: 1,
+    origin,
+    request_id: requestId ?? null,
+    session_id: process.env.CLAUDE_CODE_SESSION_ID || null,
+    head: head.id,
+    dirty: head.id ? worktreeDirty(cwd) : null,
+    scope_commit: scope?.type === "commit" ? scoped.id : null,
+    base_commit: scope?.type === "base" ? scoped.id : null,
+    provenance_error: head.error ?? scoped.error ?? null
+  };
+}
+
+// The finding triage takes only jobs that end after its start time. The
+// launcher publishes that time at turn ends; a review started earlier in the
+// first turn after the switch-on would end before it, so the start of a review
+// publishes it too. It follows the shared settings only, and a failure never
+// stops the job.
+function publishTriageStart() {
+  try {
+    const { config } = loadConfig(sharedEnv());
+    if (triageOn(config) && config.triageProjects.length > 0) {
+      sweepSince();
+    }
+  } catch (error) {
+    process.stderr.write(`subagent-router: the triage start time could not be published: ${error.message}\n`);
+  }
+}
+
+function startJob({ kind, model, effort, scope, brief, cwd, origin = "direct", requestId = null }) {
   if (!codexPlatformSupported()) {
     throw new UsageError("Codex jobs need macOS or Linux: they use `ps` and process groups to know when a job has ended");
   }
@@ -125,6 +163,11 @@ function startJob({ kind, model, effort, scope, brief, cwd }) {
     process.stderr.write(`subagent-router config: ${warning}\n`);
   }
 
+  // Before the job takes its start time, so the triage's start time is never
+  // later than it.
+  if (kind === "review") {
+    publishTriageStart();
+  }
   const job = {
     id: newJobId(),
     kind,
@@ -135,6 +178,7 @@ function startJob({ kind, model, effort, scope, brief, cwd }) {
     has_brief: brief.trim().length > 0,
     created_at: new Date().toISOString()
   };
+  Object.assign(job, provenanceOf({ kind, scope: job.scope, cwd, origin, requestId }));
   if (sendsBriefToCodex(job) && !job.has_brief) {
     const missing = { implement: "implement needs the task text", consult: "consult needs the question" };
     throw new UsageError(missing[kind] ?? "review --custom needs the review instructions");
@@ -162,7 +206,10 @@ function startJob({ kind, model, effort, scope, brief, cwd }) {
     }
     fs.writeFileSync(path.join(dir, "brief.md"), `${brief}${extras}`, { mode: 0o600 });
   }
-  fs.writeFileSync(path.join(dir, "job.json"), JSON.stringify(job, null, 2), { mode: 0o600 });
+  // Through a temporary file and a rename, so a reader never sees half a job.
+  const jobFile = path.join(dir, "job.json");
+  fs.writeFileSync(`${jobFile}.tmp`, JSON.stringify(job, null, 2), { mode: 0o600 });
+  fs.renameSync(`${jobFile}.tmp`, jobFile);
 
   // The output of the runner goes to a file, so a crash of the runner leaves a reason.
   const runnerLog = fs.openSync(path.join(dir, "runner.log"), "a", 0o600);
@@ -269,7 +316,7 @@ function printResult(dir) {
     const tokens = events.usage?.input_tokens > 0 ? ` input_tokens=${events.usage.input_tokens} output_tokens=${events.usage.output_tokens ?? "?"}` : "";
     const credits =
       limits && limits.usedPercent >= 100
-        ? `Note for the user: the weekly Codex allowance is used up, so this run was paid from Codex credits. Balance now: ${limits.creditsBalance ?? "unknown"}.\n`
+        ? `Note for the user: a Codex plan window is used up, so this run was paid from Codex credits. Balance now: ${limits.creditsBalance ?? "unknown"}.\n`
         : "";
     process.stdout.write(`CODEX_JOB ${id} exit=0${describeJob(job)}${tokens}${used}\n${credits}${fullAnswer(job, result, events)}\n`);
     return 0;
@@ -435,6 +482,19 @@ async function cancelJob(dir) {
     process.stderr.write(`subagent-router: the writer lock of the job ${id} was not given back, because another start held its breaker; the next start removes it\n`);
   }
   if (!fs.existsSync(path.join(dir, "exit-code"))) {
+    // The finding triage sends only review jobs that end after its start time.
+    // While the triage is off for everyone, the end of a job removes that time,
+    // as the runner does, so a job that ended while the triage was off is never
+    // sent once the triage is on again. Only the shared settings count, and a
+    // failure here never stops the cancel.
+    try {
+      const { config: shared } = loadConfig(sharedEnv());
+      if (!triageOn(shared) || shared.triageProjects.length === 0) {
+        removeSweepSince();
+      }
+    } catch (error) {
+      process.stderr.write(`subagent-router: the triage start time could not be checked or removed: ${error.message}\n`);
+    }
     fs.appendFileSync(path.join(dir, "stderr.log"), "\nsubagent-router: the job was cancelled\n");
     fs.writeFileSync(path.join(dir, "exit-code"), "130");
   }
@@ -471,7 +531,7 @@ async function jobDirOfRequest(id) {
       }
       let dir;
       try {
-        dir = startJob({ kind: request.kind, model: request.model, effort: request.effort, scope: request.scope, brief: request.brief ?? "", cwd: request.cwd });
+        dir = startJob({ kind: request.kind, model: request.model, effort: request.effort, scope: request.scope, brief: request.brief ?? "", cwd: request.cwd, origin: "routed", requestId: id });
       } catch (error) {
         // startJob() throws only before it starts a runner. So the request goes
         // back to its stored form, and a later `run` can try again, for example

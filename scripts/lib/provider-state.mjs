@@ -123,7 +123,9 @@ export function codexNotice(codex) {
   if (codex.reason === "codex_disabled") {
     return 'Codex is off, because "codexEnabled" is not true in ~/.claude/orchestrator/config.json. Tasks for Codex run on Claude workers instead.';
   }
-  const why = codex.reason === "codex_plan_used_up" ? "The weekly Codex allowance of the ChatGPT plan is used up" : "Codex reported that the ChatGPT plan has no capacity left";
+  // The saved numbers come from the Codex window that is used most, which can
+  // be the 5-hour window or the weekly one, so the text names neither.
+  const why = codex.reason === "codex_plan_used_up" ? "A Codex plan window of the ChatGPT plan is used up" : "Codex reported that the ChatGPT plan has no capacity left";
   return `${why}. Until ${describeTime(codex.until)}, tasks for Codex run on Claude workers instead.`;
 }
 
@@ -156,11 +158,18 @@ export function claudeCapNotice(claude) {
   return `${claudeUsageText(claude)} Codex cannot take work, so tasks that would run on Opus now run on Sonnet, to save the Claude limit.`;
 }
 
+// The notice for both providers near their limits. Codex can still take work,
+// so the table does not lower Opus, and moving work there would only move the
+// problem, so it moves nothing: each task takes the route it takes at low usage.
+export function claudeAndCodexTightNotice(claude, codex) {
+  return `${claudeUsageText(claude)} Codex is near its own limit too (${Math.round(codex.usedPercent)}% used), so the limit rule moves nothing: each task takes its normal route.`;
+}
+
 // The notice for a limit rule that cannot see Claude usage, or null when it can.
 // Only the status line receives the usage numbers, and the Claude Code desktop
 // app runs no status line. Before this notice, the rule then stopped acting and
-// nobody was told. A missing file gets no notice: the user never set the status
-// line up, and the README says that the rule is then off.
+// nobody was told. A missing file returns null here; limitsMissingNotice gives
+// that case its own notice.
 export function limitsBlindNotice(claude, config) {
   const limits = claude.limits ?? {};
   const effect = "Until a fresh sample arrives, the hook does not lower Opus or move work to Codex when Claude usage is high.";
@@ -176,6 +185,16 @@ export function limitsBlindNotice(claude, config) {
     return `The limit rule is off: the Claude usage sample cannot be read (${limits.detail}). ${effect}`;
   }
   return null;
+}
+
+// The notice for a limit rule with no usage sample at all. The status line
+// writes the sample, and the desktop app runs none, so a desktop-only user gets
+// this; before, a missing file got no notice and the rule was off in silence.
+export function limitsMissingNotice(claude) {
+  if (claude.limits?.state !== "missing") {
+    return null;
+  }
+  return "The limit rule is off: no Claude usage sample exists. The status line writes it; the Claude Code desktop app runs no status line, a terminal session does. Until a sample arrives, the hook does not lower Opus or move work to Codex when Claude usage is high.";
 }
 
 // Marks of notices that were shown are kept this long. A session that resumes

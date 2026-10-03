@@ -46,6 +46,8 @@ function writeStore(dataDir) {
     // d3: a review after a Claude writer goes to Codex and finds things.
     dispatch(s1, "09:12", { tool_use_id: "t3", requested: { agent: "subagent-router:reviewer", model: null }, final: { agent: "subagent-router:codex-reviewer", model: "haiku" }, action: "rewrite", reason: "cross_review", route: { agent: "subagent-router:codex-reviewer", model: "haiku", reason: "cross_review" }, jev: jev({ kind: "review", writesFiles: 0.02 }), claude: calm, prompt: `${SECRET} review` }),
     ...run(s1, "09:12", "t3", "a3", "subagent-router:codex-reviewer", "09:15", { findings: { P0: 0, P1: 1, P2: 2, P3: 0 } }),
+    // The count from the Codex job's own result; without it the review would be unknown.
+    { ts: at("09:15"), event: "review_findings", session_id: "s1", cwd: "/work/alpha", agent_id: "a3", agent_type: "subagent-router:codex-reviewer", source: "codex_result", counts: { P0: 0, P1: 1, P2: 2, P3: 0 } },
     // d4: the same brief as d2 again, on opus: a retry on a bigger model. Its worker wrote and passed.
     dispatch(s1, "09:20", { tool_use_id: "t4", requested: { agent: "subagent-router:implementer", model: "opus" }, final: { agent: "subagent-router:implementer", model: "opus" }, action: "pass", reason: "keep_requested", route: { agent: "subagent-router:implementer", model: "sonnet", reason: "implement" }, jev: jev(), claude: calm, prompt: `${SECRET} two` }),
     ...run(s1, "09:20", "t4", "a4", "subagent-router:implementer", "09:30", { result: "Changed files: y.js\nVerification: npm test, 12 passed\nOpen problems: none" }),
@@ -113,7 +115,7 @@ test("the report counts the store: dispatches, the changed share, Jev, the label
     const report = buildReport(loadStore({ ORCH_DATA_DIR: dataDir }));
 
     // 3 session records, 14 dispatches, 10 worker runs of 3 records, 1 hook error.
-    assert.deepEqual(report.store.files.map((file) => [file.name, file.exists, file.lines, file.broken]), [["dispatch-log.1.jsonl", true, 1, 1], ["dispatch-log.jsonl", true, 48, 0], ["limits.jsonl", true, 5, 0]]);
+    assert.deepEqual(report.store.files.map((file) => [file.name, file.exists, file.lines, file.broken]), [["dispatch-log.1.jsonl", true, 1, 1], ["dispatch-log.jsonl", true, 49, 0], ["limits.jsonl", true, 5, 0]]);
     assert.deepEqual([report.store.sessions, report.store.hookErrors, report.store.recordsWithoutCwd], [4, 1, 2]);
     assert.deepEqual(report.store.projects, { "/work/alpha": 8, "/work/beta": 6, "(no cwd)": 1 });
     // The newest session record sets the configuration in force: s3 has paceAfter 0.25, the two older ones 0.2.
@@ -296,6 +298,8 @@ test("records from before the rename count under the new worker names", () => {
       ...run(10, 1, "orchestrator:implementer", { result: "Changed files: a.js\nVerification: npm test, 3 passed\nOpen problems: none" }),
       dispatch(20, 2, "subagent-router:codex-reviewer"),
       ...run(20, 2, "subagent-router:codex-reviewer", { findings: { P0: 0, P1: 1, P2: 0, P3: 0 } }),
+      // A Codex reviewer counts only through the count from its job's result.
+      { ...base, ts: at(21), event: "review_findings", agent_id: "a2", agent_type: "subagent-router:codex-reviewer", source: "codex_result", counts: { P0: 0, P1: 1, P2: 0, P3: 0 } },
       dispatch(30, 3, "subagent-router:codex-implementer"),
       ...run(30, 3, "subagent-router:codex-implementer", { result: "Changed files: b.js\nVerification: node --test, 2 passed\nOpen problems: none" }),
       dispatch(40, 4, "orchestrator:reviewer"),
@@ -342,12 +346,26 @@ test("a failed Codex job is counted under its reason, not under its job id", asy
   }
 });
 
+test("the word search reads a count of zero failures as a pass, and still sees a real failure next to it", () => {
+  const at = (minute) => `2026-09-30T10:${minute}:00.000Z`;
+  const stop = (agentId, minute, verification) => ({
+    ts: at(minute), event: "stop", session_id: "s", agent_id: agentId, agent_type: "subagent-router:implementer",
+    result: `Changed files: a.js\nVerification: ${verification}\nOpen problems: none`
+  });
+  // No Jev labels here, as with Jev off (the default): the word search decides.
+  const passing = ["npm test: 225 pass, 0 fail", "node --test: 4 passed, 0 failed", "tests 12, pass 12, fail 0", "0 failures, 0 errors"];
+  const failing = ["0 failed; build: exit code 1", "npm test: 1 failed", "3 passed, 2 failures", "fail 3", "lint: 0 errors, test: 1 error"];
+  const log = [...passing, ...failing].map((text, index) => stop(`a${index}`, String(10 + index), text));
+  const { underRouting } = buildReport({ dataDir: "/x", files: [], log, limits: [] });
+  assert.equal(underRouting.verificationFailed, failing.length, "only the lines with a real failure count");
+});
+
 test("the report takes the verification outcome from Jev and falls back to the word search", () => {
   const at = (minute) => `2026-09-24T10:${minute}:00.000Z`;
   const stop = (agentId, minute, result) => ({ ts: at(minute), event: "stop", session_id: "s", agent_id: agentId, agent_type: "subagent-router:implementer", result });
   const log = [
-    // The word search reads "0 fail" and "no errors" as failures. Jev's labels say
-    // passed and not_run, and they must win.
+    // The word search reads "no errors" as a failure. Jev's labels say passed and
+    // not_run, and they must win.
     stop("a1", "01", "Changed files: a.js\nVerification: npm test: 225 pass, 0 fail\nOpen problems: none"),
     { ts: at("01"), event: "verification", session_id: "s", agent_id: "a1", outcome: "passed", confidence: 0.97 },
     stop("a2", "02", "Changed files: b.js\nVerification: skipped, only read the code with no errors seen\nOpen problems: none"),
@@ -369,4 +387,100 @@ test("the report takes the verification outcome from Jev and falls back to the w
     [3, 1, 4],
     "a3 and a5 by Jev and a4 by the word search failed; a2 was not run; a1 passed although the words say fail"
   );
+});
+
+test("a Codex review's findings come from its review_findings record; unavailable or missing is unknown", () => {
+  const base = { session_id: "s", cwd: "/work/p" };
+  const at = (m) => `2026-09-30T10:${m}:00.000Z`;
+  const review = (id, minute) => [
+    { ...base, ts: at(minute), event: "dispatch", mode: "enforce", tool_use_id: `t${id}`, requested: { agent: "subagent-router:codex-reviewer", model: null }, final: { agent: "subagent-router:codex-reviewer", model: null }, action: "agree", reason: "review" },
+    { ...base, ts: at(minute), event: "launched", tool_use_id: `t${id}`, agent_id: `a${id}`, final: { agent: "subagent-router:codex-reviewer", model: null } },
+    // The wrapper's paraphrase holds no tags, and a stale count says zero.
+    { ...base, ts: at(minute + 1), event: "stop", agent_id: `a${id}`, agent_type: "subagent-router:codex-reviewer", result: "The review found 2 blocking issues.", findings: { P0: 0, P1: 0, P2: 0, P3: 0 } }
+  ];
+  const report = buildReport({
+    dataDir: "/tmp/none",
+    log: [
+      ...review(1, 10),
+      { ...base, ts: at(12), event: "review_findings", agent_id: "a1", source: "codex_result", counts: { P0: 0, P1: 2, P2: 0, P3: 0 } },
+      ...review(2, 20),
+      { ...base, ts: at(22), event: "review_findings", agent_id: "a2", source: "unavailable", reason: "no_job", counts: null },
+      // No count record at all: the wrapper's zero is never used. Codex reviews
+      // logged before the triage hook wrote these records look the same.
+      ...review(3, 30),
+      ...review(4, 35),
+      // A failed job, a result the parser did not understand, and a record
+      // without a reason, which names its source instead.
+      ...review(5, 40),
+      { ...base, ts: at(42), event: "review_findings", agent_id: "a5", source: "unavailable", reason: "exit_1", counts: null },
+      ...review(6, 45),
+      { ...base, ts: at(47), event: "review_findings", agent_id: "a6", source: "unavailable", reason: "unparsed", counts: null },
+      ...review(7, 50),
+      { ...base, ts: at(52), event: "review_findings", agent_id: "a7", source: "unavailable", counts: null }
+    ],
+    limits: [],
+    files: []
+  });
+  const unknownFamily = report.findings.unknown;
+  assert.equal(unknownFamily.P1, 2, "the real count, not the stale zero");
+  assert.equal(unknownFamily.reviews, 1, "the unavailable review is not counted as a review with zero findings");
+  assert.equal(report.findingsUnknown, 6);
+  assert.deepEqual(report.findingsUnknownByReason, { no_job: 1, "no count record": 2, exit_1: 1, unparsed: 1, unavailable: 1 });
+  // One cause for every unknown review was wrong: a failed job and an
+  // unparsed result were both reported as "the Codex result could not be found".
+  const line = renderText(report).split("\n").find((entry) => entry.includes("counts are unknown")) ?? "";
+  assert.match(line, /reviews whose counts are unknown: 6 \(/);
+  for (const part of ["no count record 2", "no_job 1", "exit_1 1", "unparsed 1", "unavailable 1"]) {
+    assert.ok(line.includes(part), `the unknown line leaves out "${part}": ${line}`);
+  }
+  assert.ok(!line.includes("could not be found"), "the line no longer gives one cause for every reason");
+});
+
+test("the report shows the triage outcomes from the done files, one per report", () => {
+  const result = (id, outcomes, state = "parsed") => ({ report_id: id, parse: { state }, findings: outcomes.map((outcome) => ({ outcome })) });
+  const report = buildReport({
+    dataDir: "/tmp/none",
+    log: [],
+    limits: [],
+    files: [],
+    triage: [result("r1", ["supports", "contradicts"]), result("r2", ["no_citation"], "partial"), result("r1", ["error"])]
+  });
+  assert.equal(report.triage.reports, 2);
+  assert.deepEqual(report.triage.outcomes, { supports: 1, contradicts: 1, no_citation: 1 });
+  assert.deepEqual(report.triage.parseStates, { parsed: 1, partial: 1 });
+  assert.match(renderText(report), /Finding triage: 2 reports, 0 eligible change groups in the evaluation pool\. Parse states: parsed 1, partial 1\. Outcomes: contradicts 1, no_citation 1, supports 1/);
+});
+
+test("the triage summary counts distinct eligible change groups of the evaluation pool", () => {
+  // A key starting with 0 lies in the evaluation pool, one starting with f in the tuning pool.
+  const EVAL = "00000000aaaaaaaa";
+  const usable = { outcome: "supports", citation: { path: "a.mjs", start: 1, end: 1 }, excerpt: "1: x" };
+  const result = (id, group, extra = {}) => ({ report_id: id, change_group: group, group_eligible: true, parse: { state: "parsed" }, findings: [usable], ...extra });
+  const report = buildReport({
+    dataDir: "/tmp/none",
+    log: [],
+    limits: [],
+    files: [],
+    triage: [
+      result("r1", EVAL),
+      result("r2", EVAL),
+      result("r3", "ffffffffbbbbbbbb"),
+      result("r4", "00000001cccccccc", { group_eligible: false }),
+      // A citation without an excerpt, and an excerpt without a citation: neither is usable.
+      result("r5", "00000002dddddddd", { findings: [{ outcome: "error", citation: usable.citation, excerpt: null }] }),
+      result("r7", "00000004ffffffff", { findings: [{ outcome: "error", citation: null, excerpt: "1: x" }] }),
+      // One usable finding next to an unusable one is enough.
+      result("r6", "00000003eeeeeeee", { findings: [{ outcome: "no_citation", citation: null, excerpt: null }, usable] })
+    ]
+  });
+  assert.equal(report.triage.evaluationGroups, 2, "the shared group once, plus r6; not the tuning, ineligible or unusable groups");
+});
+
+test("the triage summary obeys the report's project and date filters", () => {
+  const result = (id, cwd, ts) => ({ report_id: id, cwd, ts, parse: { state: "parsed" }, findings: [{ outcome: "supports" }] });
+  const report = buildReport(
+    { dataDir: "/tmp/none", log: [], limits: [], files: [], triage: [result("a", "/work/alpha", "2026-10-01T10:00:00.000Z"), result("b", "/work/beta", "2026-10-01T10:00:00.000Z"), result("c", "/work/alpha", "2026-09-01T10:00:00.000Z")] },
+    { project: "alpha", since: Date.parse("2026-09-15T00:00:00.000Z") }
+  );
+  assert.equal(report.triage.reports, 1);
 });

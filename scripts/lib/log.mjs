@@ -207,6 +207,12 @@ export function registerSecret(value) {
   }
 }
 
+// A copy of the registered secrets, for code that must mask them in text it
+// sends elsewhere (the finding triage), not only in the log.
+export function registeredSecrets() {
+  return [...secrets];
+}
+
 function withoutSecrets(line) {
   let clean = line;
   for (const secret of secrets) {

@@ -94,6 +94,8 @@ const MODES = new Set(["enforce", "shadow", "off"]);
 // whose routing is already in force. "shadow" changes no route and records what
 // it would have changed, "enforce" changes the route, "off" does neither.
 const COMPLETE_RULES = new Set(["shadow", "enforce", "off"]);
+// "annotate" is phase 2 of the triage and is not built yet.
+const TRIAGE_MODES = new Set(["off", "log"]);
 
 export const DEFAULTS = Object.freeze({
   mode: "enforce",
@@ -128,15 +130,25 @@ export const DEFAULTS = Object.freeze({
   // and consult briefs. Codex does not discover these Claude sources itself.
   codexIncludeUserRules: true,
   codexIncludeProjectRules: true,
-  // When the weekly Codex allowance is used up, Codex goes on and pays from bought
-  // credits. "Subscriptions only" means no, unless the user says yes here.
+  // When a Codex plan window (the 5-hour or the weekly one) is used up, Codex goes
+  // on and pays from bought credits. "Subscriptions only" means no, unless the
+  // user says yes here.
   codexSpendCredits: false,
   // For an agent type that is not one of our workers, the hook can set the model.
   // It never changes the agent type. The briefs of these calls then go to Jev too.
   routeOtherAgents: true,
   // Agent types whose model the hook leaves alone, by exact name. Jev sees only the
   // brief, so it cannot know that an agent runs on a small model on purpose.
-  keepModelAgents: Object.freeze([])
+  keepModelAgents: Object.freeze([]),
+  // The finding triage sends each cited review finding and a short code excerpt
+  // to TypeSafe. That is new data leaving the machine, so it has its own switch,
+  // and it runs only for the checkouts listed in triageProjects.
+  triageMode: "off",
+  reviewFormats: Object.freeze([]),
+  triageProjects: Object.freeze([]),
+  // A worktree has its own top folder, so it is off until it is listed. With
+  // this switch, a listed checkout also covers the worktrees of its repository.
+  triageWorktrees: false
 });
 
 // One fixed folder for the log, the Codex jobs and the limits file.
@@ -216,6 +228,57 @@ function textList(name, value, fallback, warnings) {
   return fallback;
 }
 
+// Checkout roots for the triage: absolute paths only. A relative path would
+// mean a different folder in every session, so it is dropped.
+function pathList(name, value, fallback, warnings) {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+  if (!Array.isArray(value)) {
+    warnings.push(`${name} must be a list of absolute paths, so the default was used`);
+    return fallback;
+  }
+  const kept = value.filter((entry) => typeof entry === "string" && path.isAbsolute(entry));
+  if (kept.length !== value.length) {
+    warnings.push(`${name} holds entries that are not absolute paths; they were dropped`);
+  }
+  return kept;
+}
+
+const FORMAT_KEYS = new Set(["agentTypes", "labels", "emptyPhrases"]);
+const stringList = (value) => Array.isArray(value) && value.every((entry) => typeof entry === "string" && entry !== "");
+
+// Which agent types report findings with which labels. A bad entry is dropped
+// with a warning that names its position; the good ones stay.
+function formatList(name, value, warnings) {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    warnings.push(`${name} must be a list of formats, so none was used`);
+    return [];
+  }
+  const kept = [];
+  value.forEach((entry, index) => {
+    const ok =
+      entry &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      Object.keys(entry).every((key) => FORMAT_KEYS.has(key)) &&
+      stringList(entry.agentTypes) &&
+      entry.agentTypes.length > 0 &&
+      stringList(entry.labels) &&
+      entry.labels.length > 0 &&
+      (entry.emptyPhrases === undefined || stringList(entry.emptyPhrases));
+    if (ok) {
+      kept.push(entry);
+    } else {
+      warnings.push(`${name} entry ${index + 1} was dropped: it needs agentTypes and labels as non-empty lists of text, emptyPhrases as an optional list, and no other keys`);
+    }
+  });
+  return kept;
+}
+
 // A variable that turns a switch on or off for one session, like ORCH_MODE does for the mode.
 function envFlag(name, value, fallback, warnings) {
   if (value === undefined || value === "") {
@@ -270,7 +333,11 @@ export const CONFIG_SPEC = Object.freeze({
   codexIncludeProjectRules: { kind: "flag", about: "send project and parent Claude instructions and imports with implement, custom review and consult briefs" },
   codexSpendCredits: { kind: "flag", about: "let a Codex job pay from bought credits once a Codex plan window, the 5-hour or the weekly one, is used up" },
   routeOtherAgents: { kind: "flag", about: "let the hook set the model of agent types that are not the plugin's own workers" },
-  keepModelAgents: { kind: "textList", about: "agent types whose model the hook never changes, by exact name" }
+  keepModelAgents: { kind: "textList", about: "agent types whose model the hook never changes, by exact name" },
+  triageMode: { kind: "choice", values: ["off", "log"], about: "log sends each cited review finding and a short code excerpt to the classifier and records its judgement; nothing reaches the session" },
+  reviewFormats: { kind: "formatList", about: "which agent types report findings with which labels, for the triage" },
+  triageProjects: { kind: "pathList", about: "the checkout roots, exact real paths, for which the triage may send finding texts and excerpts; empty sends nothing" },
+  triageWorktrees: { kind: "flag", about: "let a checkout in triageProjects also cover the worktrees of its repository, also later ones: the same git common directory (the shared .git folder of all worktrees of one repository) and a folder that git lists as a worktree, never a path prefix" }
 });
 
 // Turns one written value into the value that belongs in the file. It throws with
@@ -316,6 +383,44 @@ export function parseSetting(key, raw) {
       }
       return value;
     }
+    case "pathList": {
+      // A JSON list, like reviewFormats takes, or paths split at commas. A path
+      // that holds a comma needs the JSON form.
+      let entries = text;
+      if (!Array.isArray(text) && String(text).trim().startsWith("[")) {
+        try {
+          entries = JSON.parse(String(text));
+        } catch (error) {
+          throw new Error(`${key} is not valid JSON: ${error.message}`);
+        }
+        if (!Array.isArray(entries)) {
+          throw new Error(`${key} must be a list of absolute paths.`);
+        }
+      } else if (!Array.isArray(text)) {
+        entries = String(text).split(",").map((entry) => entry.trim()).filter(Boolean);
+      }
+      const bad = entries.find((entry) => typeof entry !== "string" || !path.isAbsolute(entry));
+      if (bad !== undefined) {
+        throw new Error(`${key} must hold absolute paths, not "${bad}".`);
+      }
+      return entries;
+    }
+    case "formatList": {
+      let value = text;
+      if (typeof text === "string") {
+        try {
+          value = JSON.parse(text);
+        } catch {
+          throw new Error(`${key} must be JSON, for example [{"agentTypes":["x"],"labels":["BLOCKING"]}].`);
+        }
+      }
+      const problems = [];
+      const kept = formatList(key, value, problems);
+      if (problems.length > 0) {
+        throw new Error(problems.join(" "));
+      }
+      return kept;
+    }
     case "textList": {
       if (Array.isArray(text)) {
         return text;
@@ -330,6 +435,14 @@ export function parseSetting(key, raw) {
       }
       return text;
   }
+}
+
+function triageMode(value, warnings) {
+  if (value === "annotate") {
+    warnings.push('triageMode "annotate" is not built yet, so "off" was used');
+    return "off";
+  }
+  return oneOf("triageMode", value, TRIAGE_MODES, "off", warnings);
 }
 
 // Order: defaults, then config.json, then environment variables.
@@ -370,7 +483,11 @@ export function loadConfig(env = process.env) {
     codexIncludeProjectRules: flag("codexIncludeProjectRules", merged.codexIncludeProjectRules, true, warnings),
     codexSpendCredits: flag("codexSpendCredits", merged.codexSpendCredits, false, warnings),
     routeOtherAgents: envFlag("ORCH_ROUTE_OTHER_AGENTS", env.ORCH_ROUTE_OTHER_AGENTS, flag("routeOtherAgents", merged.routeOtherAgents, true, warnings), warnings),
-    keepModelAgents: textList("keepModelAgents", merged.keepModelAgents, DEFAULTS.keepModelAgents, warnings)
+    keepModelAgents: textList("keepModelAgents", merged.keepModelAgents, DEFAULTS.keepModelAgents, warnings),
+    triageMode: triageMode(merged.triageMode, warnings),
+    reviewFormats: formatList("reviewFormats", merged.reviewFormats, warnings),
+    triageProjects: pathList("triageProjects", merged.triageProjects, DEFAULTS.triageProjects, warnings),
+    triageWorktrees: flag("triageWorktrees", merged.triageWorktrees, false, warnings)
   };
 
   return { config, warnings };

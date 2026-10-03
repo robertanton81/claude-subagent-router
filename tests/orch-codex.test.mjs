@@ -718,7 +718,7 @@ test("the limit numbers of Codex are saved after a job, and spent credits are re
     fs.writeFileSync(env.ORCH_CODEX_BIN, fakeCodexWithLimits(100, "57.8"), { mode: 0o755 });
     const paid = await runNode(CLI, { args: ["review", "--wait", "20"], stdin: "", env: withHome, cwd: tempDir });
     assert.ok(paid.stdout.includes("codex_used=100%"));
-    assert.ok(paid.stdout.includes("paid from Codex credits. Balance now: 57.8"), paid.stdout);
+    assert.ok(paid.stdout.includes("a Codex plan window is used up, so this run was paid from Codex credits. Balance now: 57.8"), paid.stdout);
 
     // Without the switch, the next job does not start at all.
     fs.rmSync(path.join(tempDir, "data", "config.json"));
@@ -972,7 +972,7 @@ test("a routing pause does not hide a used-up plan, so the runner still starts n
     const refused = await runNode(CLI, { args: ["implement", "--wait", "20"], stdin: "Goal: x", env, cwd: tempDir });
     assert.equal(refused.code, 1, refused.stdout);
     assert.match(refused.stdout, /^CODEX_FAILED \S+ exit=75\n/);
-    assert.ok(refused.stdout.includes("allowance of the ChatGPT plan is used up") && refused.stdout.includes("balance 57.8"), refused.stdout);
+    assert.ok(refused.stdout.includes("A Codex plan window of the ChatGPT plan is used up") && refused.stdout.includes("balance 57.8"), refused.stdout);
     const jobDir = path.join(dataDir, "codex-jobs", jobIdOf(refused.stdout));
     assert.ok(!fs.existsSync(path.join(jobDir, "codex.pid")), "only the login check may run, not the job itself");
 

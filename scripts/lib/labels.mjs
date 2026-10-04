@@ -210,12 +210,13 @@ export function sample(name, env = process.env) {
   const results = windowResults(pools, env);
   const groups = eligibleGroups(results, pools.exposedGroups);
   const groupKeys = shuffle([...groups.keys()].sort(), next).slice(0, SAMPLE_GROUPS);
-  const items = [];
+  // The main findings and the precision items: both kinds look the same on the screen.
+  const findingItems = [];
   const answers = {};
   for (const key of groupKeys) {
     const choices = groups.get(key);
     const { result, finding } = choices[Math.floor(next() * choices.length)];
-    items.push(findingItem("finding", result, finding));
+    findingItems.push(findingItem("finding", result, finding));
     answers[finding.finding_id] = finding.outcome;
   }
   const picked = new Set(groupKeys);
@@ -224,12 +225,19 @@ export function sample(name, env = process.env) {
     next
   ).slice(0, PRECISION_SAMPLE);
   for (const { result, finding } of precision) {
-    items.push(findingItem("precision", result, finding));
+    findingItems.push(findingItem("precision", result, finding));
     answers[finding.finding_id] = finding.outcome;
   }
-  for (const result of shuffle(results, next).slice(0, REPORT_SAMPLE)) {
-    items.push({ kind: "report", id: result.report_id, agent_type: result.agent_type, parse_state: result.parse?.state, snapshot: result.snapshot ?? null, items: (result.findings ?? []).map((f) => ({ label: f.label, text: f.text })) });
-  }
+  const reports = shuffle(results, next)
+    .slice(0, REPORT_SAMPLE)
+    .map((result) => ({ kind: "report", id: result.report_id, agent_type: result.agent_type, parse_state: result.parse?.state, snapshot: result.snapshot ?? null, items: (result.findings ?? []).map((f) => ({ label: f.label, text: f.text })) }));
+  // The labelling screen shows a main finding and a precision item the same way,
+  // so their order must not tell them apart either. This shuffle changes the
+  // order on the screen only. It comes after every draw, so the draws above make
+  // the same calls to next() as before, and a seed still selects the same
+  // groups, findings, precision items and reports. The answers and the meta
+  // stay in draw order. The reports keep their place after the findings.
+  const items = [...shuffle(findingItems, next), ...reports];
   const dir = path.join(labelsDir(env), new Date(nowMs(env)).toISOString().slice(0, 10), name);
   if (fs.existsSync(dir)) throw new Error(`${dir} exists already.`);
   writePrivate(path.join(dir, "items.json"), items);
@@ -304,19 +312,36 @@ export function evaluate(items, labels, answers) {
   return { harm, use, coverage, parsing, precision, overall, skipped, distinctReports };
 }
 
+// A score has two writes: meta.json, then pools.json. The meta.json write is the
+// commit point, and it holds the one result. When the pools write fails (a full
+// disk, a kill between the two writes), the next score finishes that score with
+// the saved result. It never evaluates again, because the labels may have
+// changed since, and a version is scored once.
 export function score(dir, env = process.env) {
-  const items = readItems(dir);
-  const labels = readLabels(dir);
-  const open = items.filter((i) => !(i.id in labels));
-  if (open.length > 0) throw new Error(`${open.length} items are not labelled or skipped yet. Run "label ${dir}".`);
-  const meta = JSON.parse(fs.readFileSync(path.join(dir, "meta.json"), "utf8"));
+  const metaFile = path.join(dir, "meta.json");
+  const meta = JSON.parse(fs.readFileSync(metaFile, "utf8"));
   const pools = readPools(env);
-  if (meta.scored || pools.scoredVersions.some((v) => sameJson(v, meta.evalVersion))) throw new Error("This evaluation version was scored already. A version is scored once.");
-  const answers = JSON.parse(fs.readFileSync(path.join(dir, "answers.json"), "utf8"));
-  const result = evaluate(items, labels, answers);
-  meta.scored = true;
-  meta.scoredAt = new Date(nowMs(env)).toISOString();
-  writePrivate(path.join(dir, "meta.json"), meta);
+  if (pools.scoredVersions.some((v) => sameJson(v, meta.evalVersion))) throw new Error("This evaluation version was scored already. A version is scored once.");
+  let result;
+  if (meta.scored) {
+    // An older score() saved no result. Evaluating now could use changed labels.
+    // Only an object of rules is a result; a list, a text or a number is not.
+    if (meta.result === null || typeof meta.result !== "object" || Array.isArray(meta.result)) {
+      throw new Error(`${metaFile} says the sample was scored, but it holds no saved result. A version is scored once, so it is not evaluated again.`);
+    }
+    result = meta.result;
+  } else {
+    const items = readItems(dir);
+    const labels = readLabels(dir);
+    const open = items.filter((i) => !(i.id in labels));
+    if (open.length > 0) throw new Error(`${open.length} items are not labelled or skipped yet. Run "label ${dir}".`);
+    const answers = JSON.parse(fs.readFileSync(path.join(dir, "answers.json"), "utf8"));
+    result = evaluate(items, labels, answers);
+    meta.scored = true;
+    meta.scoredAt = new Date(nowMs(env)).toISOString();
+    meta.result = result;
+    writePrivate(metaFile, meta);
+  }
   pools.scoredVersions.push(meta.evalVersion);
   pools.exposedGroups = [...new Set([...pools.exposedGroups, ...meta.groups])];
   writePrivate(poolsFile(env), pools);

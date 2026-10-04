@@ -10,7 +10,6 @@ import test, { mock } from "node:test";
 
 import { restoreRequest, writeRequest } from "../scripts/lib/codex-request.mjs";
 import { scanJobs, sweepSince } from "../scripts/lib/sweep.mjs";
-import { pathToFileURL } from "node:url";
 
 import {
   CLAUDE_START_MAX_MS,
@@ -615,19 +614,25 @@ test("a lock taken in a sub-folder holds the whole checkout, and a linked worktr
   });
 });
 
+// Reads and changes fields of the lock file at `lockPath`, as the passing of
+// time or a lock written by an older plugin version would.
+function lockFields(lockPath) {
+  const read = () => JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  const set = (field, value) => fs.writeFileSync(lockPath, JSON.stringify({ ...read(), [field]: value }));
+  const shift = (field, ms) => set(field, new Date(Date.now() - ms).toISOString());
+  return { read, set, shift };
+}
+
 test("a Claude writer holds the checkout against Claude writers and Codex jobs until its subagent stops", async () => {
   await withTemp(({ tempDir, env, project }) => {
     const writer = "subagent-router:implementer";
     const lockPath = writerLockPath(project, env);
-    const shift = (field, ms) => {
-      const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
-      fs.writeFileSync(lockPath, JSON.stringify({ ...lock, [field]: new Date(Date.now() - ms).toISOString() }));
-    };
+    const { shift } = lockFields(lockPath);
 
-    assert.equal(acquireClaudeWriterLock(project, { sessionId: "s1", toolUseId: "toolu_1", agentType: writer }, env, process.pid), null);
+    assert.equal(acquireClaudeWriterLock(project, { sessionId: "s1", toolUseId: "toolu_1", agentType: writer }, env), null);
     const holder = activeWriter(project, env);
     assert.ok(isClaudeWriter(holder), holder);
-    assert.equal(acquireClaudeWriterLock(project, { sessionId: "s1", toolUseId: "toolu_2", agentType: writer }, env, process.pid), holder, "a second writer sent in the same message waits");
+    assert.equal(acquireClaudeWriterLock(project, { sessionId: "s1", toolUseId: "toolu_2", agentType: writer }, env), holder, "a second writer sent in the same message waits");
     const jobA = "20260925-110000-aaaaaa";
     fs.mkdirSync(path.join(jobsDir(env), jobA), { recursive: true });
     assert.equal(acquireWriterLock(project, jobA, env), holder, "a Codex job waits too");
@@ -641,7 +646,7 @@ test("a Claude writer holds the checkout against Claude writers and Codex jobs u
     // starts there must confirm that lock, not the first one.
     const other = path.join(tempDir, "other");
     fs.mkdirSync(other);
-    assert.equal(acquireClaudeWriterLock(other, { sessionId: "s1", toolUseId: "toolu_9", agentType: writer }, env, process.pid), null);
+    assert.equal(acquireClaudeWriterLock(other, { sessionId: "s1", toolUseId: "toolu_9", agentType: writer }, env), null);
     assert.equal(confirmClaudeWriterLock({ cwd: other, sessionId: "s1", agentType: writer, agentId: "a9" }, env), true);
     assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf8")).agent_id, undefined, "the lock of the first checkout still waits for its own subagent");
 
@@ -655,21 +660,63 @@ test("a Claude writer holds the checkout against Claude writers and Codex jobs u
     assert.equal(releaseClaudeWriterLock("a1", env), true);
     assert.equal(activeWriter(project, env), null);
     assert.equal(fs.existsSync(lockPath), false);
+  });
+});
 
-    // A lock whose session has ended, or whose subagent never stopped, does not block for ever.
-    assert.equal(acquireClaudeWriterLock(project, { sessionId: "s3", toolUseId: "toolu_3", agentType: writer }, env, deadPid()), null);
-    assert.equal(activeWriter(project, env), null, "the Claude Code process of the session is gone");
-    assert.equal(acquireClaudeWriterLock(project, { sessionId: "s4", toolUseId: "toolu_4", agentType: writer }, env, process.pid), null);
-    assert.equal(confirmClaudeWriterLock({ cwd: project, sessionId: "s4", agentType: writer, agentId: "a4" }, env), true);
-    shift("started_at", CLAUDE_WRITER_MAX_MS + 1000);
+test("a Claude writer's lock ignores the end of the Claude Code process that took it", async () => {
+  await withTemp(({ env, project }) => {
+    const writer = "subagent-router:implementer";
+    const { read, set, shift } = lockFields(writerLockPath(project, env));
+    // Claude Code moves a running subagent to a new process when the session
+    // goes to the background or its supervisor restarts it, so the end of the
+    // old process proves nothing. Locks of 0.3.2 to 0.4.0 still name it.
+    assert.equal(acquireClaudeWriterLock(project, { sessionId: "s3", toolUseId: "toolu_3", agentType: writer }, env), null);
+    const holder = activeWriter(project, env);
+    set("session_pid", deadPid());
+    assert.equal(activeWriter(project, env), holder, "a waiting lock keeps its start window when its session process is gone");
+    assert.equal(acquireClaudeWriterLock(project, { sessionId: "s4", toolUseId: "toolu_4", agentType: writer }, env), holder, "a writer of another session waits");
+    assert.equal(confirmClaudeWriterLock({ cwd: project, sessionId: "s3", agentType: writer, agentId: "a3" }, env), true);
+    shift("created_at", 31 * 1000);
+    assert.equal(activeWriter(project, env), holder, "a started writer holds the checkout when its session process is gone");
+    const job = "20260925-110000-bbbbbb";
+    fs.mkdirSync(path.join(jobsDir(env), job), { recursive: true });
+    assert.equal(acquireWriterLock(project, job, env), holder, "a Codex job waits for it too");
+
+    // The new process starts the subagent again, with the same agent id.
+    shift("started_at", 10 * 60 * 1000);
+    const before = read();
+    assert.equal(confirmClaudeWriterLock({ cwd: project, sessionId: "s3", agentType: writer, agentId: "a3" }, env), true, "the resumed subagent keeps its lock");
+    assert.deepEqual(read(), before, "the lock does not change, so the age limit does not move");
+    assert.equal(confirmClaudeWriterLock({ cwd: project, sessionId: "s3", agentType: writer, agentId: "a-other" }, env), false, "another subagent does not get it");
+    assert.equal(confirmClaudeWriterLock({ cwd: project, sessionId: "s9", agentType: writer, agentId: "a3" }, env), false, "nor does an agent id of another session");
+    assert.deepEqual(read(), before, "a refused start changes nothing");
+    assert.equal(activeWriter(project, env), holder);
+
+    // The subagent's stop gives the lock back, whichever process sends it.
+    assert.equal(releaseClaudeWriterLock("a3", env), true);
     assert.equal(activeWriter(project, env), null);
   });
 });
 
-test("the session process of a hook is found through a shell that started it", () => {
-  const lock = pathToFileURL(path.join(ROOT, "scripts", "lib", "writer-lock.mjs")).href;
-  const script = `import { sessionProcessPid } from "${lock}"; console.log(sessionProcessPid());`;
-  // "; exit 0" keeps the shell alive as the hook's parent, instead of letting it exec the hook.
-  const result = spawnSync("/bin/sh", ["-c", `"${process.execPath}" --input-type=module -e '${script}'; exit 0`], { encoding: "utf8" });
-  assert.equal(result.stdout.trim(), String(process.pid), result.stderr);
+test("a Claude writer's lock counts 30 seconds until its subagent starts, then 60 minutes", async () => {
+  await withTemp(({ env, project }) => {
+    const writer = "subagent-router:implementer";
+    const { shift } = lockFields(writerLockPath(project, env));
+    assert.equal(acquireClaudeWriterLock(project, { sessionId: "s5", toolUseId: "toolu_5", agentType: writer }, env), null);
+    const holder = activeWriter(project, env);
+    shift("created_at", 29 * 1000);
+    assert.equal(activeWriter(project, env), holder);
+    shift("created_at", 31 * 1000);
+    assert.equal(activeWriter(project, env), null, "a writer that never started stops counting after 30 seconds");
+
+    shift("created_at", 0);
+    assert.equal(confirmClaudeWriterLock({ cwd: project, sessionId: "s5", agentType: writer, agentId: "a5" }, env), true);
+    shift("started_at", 59 * 60 * 1000);
+    assert.equal(activeWriter(project, env), holder, "a started writer counts for up to 60 minutes");
+    shift("started_at", 61 * 60 * 1000);
+    assert.equal(activeWriter(project, env), null, "a writer whose stop never comes stops counting after 60 minutes");
+    // The next writer removes the dead lock and takes the checkout.
+    assert.equal(acquireClaudeWriterLock(project, { sessionId: "s6", toolUseId: "toolu_6", agentType: writer }, env), null);
+    assert.equal(activeWriter(project, env), "claude:toolu_6");
+  });
 });

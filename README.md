@@ -452,7 +452,7 @@ The files in the data folder are listed in [The data folder](REFERENCE.md#the-da
 
 ## Known limits
 
-- **The writer lock has gaps.** It does not cover edits by the main session, and calls to other agent types take no lock. See [The writer lock](REFERENCE.md#the-writer-lock).
+- **The writer lock has gaps.** It does not cover edits by the main session, and calls to other agent types take no lock. After a real crash of a session, when no new process takes its writer over, the lock blocks other writers for up to one hour. See [The writer lock](REFERENCE.md#the-writer-lock).
 - **The `codex:codex-rescue` redirect** blocks one known way to skip the routing, not all of them.
 - **Codex reports zero tokens for a scoped review,** so the log has no token count for those reviews. A custom review and a consult report their tokens.
 - **The Codex plan numbers can be old or missing.** The plugin learns them only after a Codex job that it started, from Codex's internal session files. A Codex update can change these files; see [Codex plan numbers](REFERENCE.md#codex-plan-numbers). When the plugin cannot read the numbers, the plan counts as unknown.

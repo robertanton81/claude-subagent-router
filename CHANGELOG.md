@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.1
+
+Writer lock:
+
+- A Claude writer's lock no longer ends when the Claude Code process of its session ends. When a session moves to the background (the left arrow, `/bg`, or "Move to background and exit"), or the supervisor (the Claude Code process that runs background sessions) restarts it, Claude Code starts a new process for the session, and a running subagent goes on there. In versions 0.3.2 to 0.4.0, the lock ended as soon as the recorded process had ended. From that moment a second writer, such as a Codex job or another Claude writer, could start in the same checkout while the first one still changed files. Now a confirmed lock ends only with its subagent's stop, which the new process sends, or after one hour. A lock that no subagent confirmed still ends after 30 seconds.
+- In those versions the lock also recorded the wrong process when `node` is a launcher that starts the real Node as a child, such as a Volta shim. In an interactive terminal session the hook's parent is then that launcher, which ends with the hook. So with such a `node`, the lock most likely held for no time at all.
+- The cost: after a real crash, when no new process takes the subagent over, the lock blocks other writers for up to one hour. The denial names the lock file; remove it only after you have checked that no writer runs.
+- A subagent that the new process takes over starts again with the same agent id. Its lock stays confirmed, and the dispatch log no longer records `writer_lock: "missing"` for that second start. The one-hour limit still counts from the first start.
+- The lock no longer records the session's process id, so the route hook runs up to four fewer `ps` calls for a Claude writer. A lock written by versions 0.3.2 to 0.4.0 still has the field; it is ignored.
+
+Finding triage:
+
+- The labelling sample shows the main findings and the precision items in one shuffled order. Before, the precision items came in one block after the others, so their position told them apart. The same seed still selects the same items.
+- `score` saves its result in `meta.json` before it marks the version as scored. When the second write fails, the next `score` finishes with the saved result and never evaluates again. Before, the window stayed waiting for a score that the command refused.
+
 ## 0.4.0
 
 Review and worker instructions:

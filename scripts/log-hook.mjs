@@ -122,7 +122,7 @@ async function main() {
       // Before the Jev call below, which can take seconds: the next writer
       // should not wait for a label.
       if (WRITER_FAMILY[input.agent_type] === "claude" && !releaseClaudeWriterLock(input.agent_id)) {
-        process.stderr.write("subagent-router: the writer lock of this subagent was not given back, because another process held its breaker; it counts until the session ends or for one hour\n");
+        process.stderr.write("subagent-router: the writer lock of this subagent was not given back, because another process held its breaker; it counts until one hour after the subagent started\n");
       }
       recordWriterStop(base.session_id, input.agent_type, input.agent_id, reportsNoWrite(input.last_assistant_message));
       await logVerification(input, config, base);

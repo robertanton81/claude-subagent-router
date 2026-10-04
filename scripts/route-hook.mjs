@@ -25,6 +25,7 @@ import { completenessShadow, decideModel, decideRoute, writerLockApplies } from 
 import { askJev, findApiKey } from "./lib/typesafe.mjs";
 import {
   CLAUDE_START_MAX_MS,
+  CLAUDE_WRITER_MAX_MS,
   UNKNOWN_WRITER,
   acquireClaudeWriterLock,
   activeWriter,
@@ -63,7 +64,8 @@ function busyWriterDenial(input, finalAgent, config, jevAnswers, record) {
       jobId,
       reason:
         `A Claude writer is still changing files in this checkout (${checkoutRoot(input.cwd)}), and only one writer may run at a time. ` +
-        `Wait until it has finished, then try again. A writer that was sent but did not start stops counting after ${CLAUDE_START_MAX_MS / 1000} seconds. ` +
+        `Wait until it has finished, then try again. A writer that was sent but did not start stops counting after ${CLAUDE_START_MAX_MS / 1000} seconds; ` +
+        `a started writer counts until its subagent stops, for at most ${CLAUDE_WRITER_MAX_MS / 60_000} minutes, also when its session has moved to another process. ` +
         `If you are sure that no writer runs, remove the lock file: ${writerLockPath(input.cwd)}`
     };
   }

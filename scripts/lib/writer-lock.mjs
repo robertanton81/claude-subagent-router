@@ -406,53 +406,38 @@ export function isClaudeWriter(holder) {
 export const CLAUDE_START_MAX_MS = 30 * 1000;
 
 // A confirmed Claude writer's lock stops counting after this time, in case its
-// SubagentStop never comes (a subagent that is killed, a log hook that fails).
-// The longest run of a plugin writer in the dispatch log up to 2026-09-25 took
-// four minutes. A writer that runs longer than this is not protected any more.
+// SubagentStop never comes (a subagent that is killed, a log hook that fails,
+// a session that crashed). The longest run of a plugin writer in the dispatch
+// log up to 2026-09-25 took four minutes. A writer that runs longer than this
+// is not protected any more.
 export const CLAUDE_WRITER_MAX_MS = 60 * 60 * 1000;
 
-// A Claude writer runs inside the Claude Code process of its session. When that
-// process is gone, so is the writer.
+// A Claude writer's lock counts by its age alone. The end of the Claude Code
+// process that took it proves nothing: when the user moves the session to the
+// background, or the supervisor (the Claude Code process that runs background
+// sessions) restarts it, Claude Code starts a new process for the session, and
+// a running subagent goes on there. A test with Claude Code 2.1.287 on
+// 2026-10-04 saw this: the new process had the same session id, fired
+// SubagentStart again with the same agent id, and sent the SubagentStop that
+// gave the lock back. After a hard kill the subagent's running command even
+// went on without its parent. Versions 0.3.2 to 0.4.0 ended the lock as soon
+// as the recorded process had ended, so a second writer could start while the
+// first one still changed files.
+// The cost: after a real crash, when no new process takes the subagent over,
+// the lock blocks other writers until CLAUDE_WRITER_MAX_MS has passed, or until
+// someone who has checked that no writer runs removes the file. A lock written
+// by those versions also names the process (`session_pid`); that field is ignored.
 function claudeWriterIsActive(lock, now) {
-  if (lock.session_pid && !processIsAlive(lock.session_pid)) {
-    return false;
-  }
   const since = Date.parse(lock.agent_id ? lock.started_at : lock.created_at);
   const age = now - since;
   return Number.isFinite(age) && age < (lock.agent_id ? CLAUDE_WRITER_MAX_MS : CLAUDE_START_MAX_MS);
 }
 
-const SHELLS = new Set(["sh", "bash", "zsh", "dash", "fish"]);
-
-// The pid of the Claude Code process that ran this hook: the first process
-// above this one that is not a shell, because Claude Code may start a hook
-// through a shell that ends with the hook. Null when `ps` cannot say; the lock
-// then counts by its age alone.
-export function sessionProcessPid(start = process.ppid) {
-  let pid = start;
-  for (let step = 0; step < 4 && Number.isInteger(pid) && pid > 1; step += 1) {
-    const result = spawnSync("ps", ["-o", "ppid=,comm=", "-p", String(pid)], { encoding: "utf8", timeout: PS_TIMEOUT_MS });
-    const match = result.error || result.status !== 0 ? null : /^\s*(\d+)\s+(.+)$/.exec(result.stdout.trim());
-    if (!match) {
-      return null;
-    }
-    if (!SHELLS.has(path.basename(match[2].trim()).replace(/^-/, ""))) {
-      return pid;
-    }
-    pid = Number(match[1]);
-  }
-  return null;
-}
-
 // Takes the lock of the checkout of `cwd` for a Claude writer that the route
 // hook is about to let through. Returns null on success, or the holder, as
 // acquireWriterLock() does.
-export function acquireClaudeWriterLock(cwd, { sessionId, toolUseId, agentType }, env = process.env, sessionPid = sessionProcessPid()) {
-  return takeLock(
-    cwd,
-    { job_id: `${CLAUDE_WRITER_PREFIX}${toolUseId}`, kind: "claude", session_id: sessionId, agent_type: agentType, session_pid: sessionPid },
-    env
-  );
+export function acquireClaudeWriterLock(cwd, { sessionId, toolUseId, agentType }, env = process.env) {
+  return takeLock(cwd, { job_id: `${CLAUDE_WRITER_PREFIX}${toolUseId}`, kind: "claude", session_id: sessionId, agent_type: agentType }, env);
 }
 
 // The Claude writer locks on disk, as [file, lock] pairs. There is one lock
@@ -479,13 +464,21 @@ function claudeLocks(env) {
 // Returns true when a lock was confirmed, false when none was waiting: then the
 // writer runs without a lock, for example after the 30 seconds had passed and
 // another writer took the checkout.
+// A subagent that Claude Code takes over into a new process of its session
+// fires SubagentStart again, with the same agent id. Its lock is confirmed
+// already, so that start returns true and changes nothing: the age limit still
+// counts from the first start.
 export function confirmClaudeWriterLock({ cwd, sessionId, agentType, agentId }, env = process.env) {
   if (!cwd || !sessionId || !agentType || !agentId) {
     return false;
   }
   const file = lockFile(cwd, env);
   const waiting = (lock) => lock?.kind === "claude" && lock.session_id === sessionId && lock.agent_type === agentType && !lock.agent_id;
-  if (!waiting(readLock(file))) {
+  const seen = readLock(file);
+  if (seen?.kind === "claude" && seen.session_id === sessionId && seen.agent_id === agentId) {
+    return true;
+  }
+  if (!waiting(seen)) {
     return false;
   }
   const deadline = Date.now() + BREAKER_WAIT_MS;
@@ -513,8 +506,8 @@ export function confirmClaudeWriterLock({ cwd, sessionId, agentType, agentId }, 
 
 // Called on SubagentStop. Gives back the lock of this subagent, if it has one.
 // Returns false when the breaker stayed busy. Unlike a Codex lock, such a lock
-// has no exit code that marks it as ended: it counts until its session ends or
-// CLAUDE_WRITER_MAX_MS has passed. The caller says so on stderr.
+// has no exit code that marks it as ended: it counts until CLAUDE_WRITER_MAX_MS
+// has passed. The caller says so on stderr.
 export function releaseClaudeWriterLock(agentId, env = process.env) {
   if (!agentId) {
     return true;

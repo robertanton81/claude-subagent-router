@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -978,6 +979,78 @@ test("a second writer, a review and a Codex job wait while a Claude writer runs 
     const shadowEnv = { ...env, ORCH_MODE: "shadow" };
     const shadow = await runNode(HOOK, { stdin: agentCall({ cwd: project, tool_use_id: "toolu_5" }), env: shadowEnv });
     assert.ok(!shadow.stdout.includes('"deny"'), shadow.stdout);
+  });
+});
+
+test("a Claude writer holds the checkout after the Claude Code process that sent it is gone", async () => {
+  await withJev({ body: jevBody({ kind: "implement", difficulty: 1 }) }, async ({ tempDir, env }) => {
+    const project = path.join(tempDir, "project");
+    fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+    // Claude Code moves a running subagent to a new process when the session
+    // goes to the background or its supervisor restarts it, so a dead session
+    // process proves nothing. This stand-in for `ps` reports the hooks' parent
+    // as a shell under a process that has ended, and records every call: the
+    // lock of a Claude writer must not ask `ps` at all.
+    const gone = spawnSync(process.execPath, ["-e", "0"]).pid;
+    const bin = path.join(tempDir, "bin");
+    const psCalls = path.join(tempDir, "ps-calls");
+    fs.mkdirSync(bin);
+    fs.writeFileSync(
+      path.join(bin, "ps"),
+      `#!/bin/sh\necho "$*" >> "${psCalls}"\nfor last; do :; done\nif [ "$last" = "${gone}" ]; then echo "    1 claude"; else echo "${gone} sh"; fi\n`,
+      { mode: 0o755 }
+    );
+    const hookEnv = { ...env, PATH: `${bin}${path.delimiter}${env.PATH}` };
+    const subagent = (event) =>
+      runNode("scripts/log-hook.mjs", { env: hookEnv, stdin: JSON.stringify({ session_id: "session-1", cwd: project, agent_id: "a1", agent_type: "subagent-router:implementer", ...event }) });
+
+    const first = await runNode(HOOK, { stdin: agentCall({ cwd: project }), env: hookEnv });
+    assert.ok(!first.stdout.includes('"deny"'), first.stdout);
+    await subagent({ hook_event_name: "SubagentStart" });
+    assert.equal(readLog(tempDir).at(-1).writer_lock, "confirmed");
+    // A lock of 0.3.2 to 0.4.0 also names the session process; here it has ended.
+    const lockPath = writerLockPath(project, env);
+    fs.writeFileSync(lockPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(lockPath, "utf8")), session_pid: gone }));
+    // The new process starts the subagent again, with the same agent id.
+    await subagent({ hook_event_name: "SubagentStart" });
+    assert.equal(readLog(tempDir).at(-1).writer_lock, "confirmed", "the resumed subagent still holds its lock");
+
+    const second = await runNode(HOOK, { stdin: agentCall({ cwd: project, session_id: "session-2", tool_use_id: "toolu_2" }), env: hookEnv });
+    const denial = second.stdout ? JSON.parse(second.stdout).hookSpecificOutput : null;
+    assert.equal(denial?.permissionDecision, "deny", `a writer of another session waits: ${second.stdout}`);
+    assert.match(denial.permissionDecisionReason, /did not start stops counting after 30 seconds/);
+    assert.match(denial.permissionDecisionReason, /counts until its subagent stops, for at most 60 minutes, also when its session has moved to another process/);
+    assert.deepEqual([readLog(tempDir).at(-1).reason, readLog(tempDir).at(-1).busy_job], ["claude_writer_busy", "claude:toolu_1"]);
+
+    // The subagent's stop gives the lock back, whichever process sends it.
+    await subagent({ hook_event_name: "SubagentStop", last_assistant_message: "Changed files: a.js" });
+    const third = await runNode(HOOK, { stdin: agentCall({ cwd: project, session_id: "session-2", tool_use_id: "toolu_3" }), env: hookEnv });
+    assert.ok(!third.stdout.includes('"deny"'), third.stdout);
+    assert.equal(readLog(tempDir).at(-1).writer_lock, "taken", "the next writer takes the checkout");
+    assert.equal(fs.existsSync(psCalls), false, `ps was called: ${fs.existsSync(psCalls) ? fs.readFileSync(psCalls, "utf8") : ""}`);
+  });
+});
+
+test("a Claude writer's stop that cannot give back its lock says so, and the lock keeps the checkout", async () => {
+  await withJev({ body: jevBody({ kind: "implement", difficulty: 1 }) }, async ({ tempDir, env }) => {
+    const project = path.join(tempDir, "project");
+    fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+    const subagent = (event) =>
+      runNode("scripts/log-hook.mjs", { env, stdin: JSON.stringify({ session_id: "session-1", cwd: project, agent_id: "a1", agent_type: "subagent-router:implementer", ...event }) });
+    const first = await runNode(HOOK, { stdin: agentCall({ cwd: project }), env });
+    assert.ok(!first.stdout.includes('"deny"'), first.stdout);
+    await subagent({ hook_event_name: "SubagentStart" });
+
+    // Another process holds the breaker of this lock for longer than the stop waits (3 seconds).
+    const breaker = `${writerLockPath(project, env)}.break`;
+    fs.writeFileSync(breaker, new Date().toISOString());
+    const stop = await subagent({ hook_event_name: "SubagentStop", last_assistant_message: "Changed files: a.js" });
+    assert.equal(stop.code, 0, "the hook fails open");
+    assert.match(stop.stderr, /was not given back, because another process held its breaker; it counts until one hour after the subagent started/);
+    fs.rmSync(breaker);
+
+    const next = await runNode(HOOK, { stdin: agentCall({ cwd: project, session_id: "session-2", tool_use_id: "toolu_2" }), env });
+    assert.ok(next.stdout.includes('"deny"'), `the lock still holds the checkout: ${next.stdout}`);
   });
 });
 

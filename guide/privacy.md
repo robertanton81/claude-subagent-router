@@ -1,0 +1,19 @@
+# What leaves your machine
+
+Part of the [Subagent Router documentation](../README.md#documentation).
+
+**To TypeSafe, only while Jev is on:**
+
+- For each subagent call that the routing hook sends to Jev: the call's description, its whole brief and the text of five questions. By default this is almost every subagent call of the main session. The hook sends nothing for a call from inside a subagent, for `statusline-setup` and `claude-code-guide`, and for the agent types that you exclude below. An `orch-route: keep` line does not stop the send.
+- When one of the plugin's own workers finishes: the `Verification:` part of its answer (the lines that say which checks ran), at most 2,000 characters, with one question. The file list and the rest of the answer stay on your machine.
+- Only while the finding triage is on (`"triageMode": "log"`) and only for the checkouts listed in `triageProjects`: when a review agent finishes, or when any Codex review job ends (also a direct `node scripts/orch-codex.mjs review` run, from any session on this machine), each finding that cites code (at most 1,500 characters), with its label and the cited path and line range, and a short excerpt of the cited code (at most 6,000 characters, at most 12 findings per request), with one question per finding. Known token shapes, URL passwords, `Authorization` header credentials and secret-like assignments (any name that holds a word such as password, secret, token or api key) are masked before anything is cut or sent. A finding is held back whole when its text quotes the first or the last line of a private key, when a file that it cites holds such a line anywhere, or when it cites a file with a common credential name, such as `.env` or `*.pem`. No excerpt is read from a binary or UTF-16 file, and, for a review agent's report, none from a file that git ignores. Not caught, for example: a text that quotes only the body lines of a key, a name without one of the words (`DB_PASS`), a default value (`|| "secret"`), and a value split over lines. This masking is best effort, not a guarantee: names and other personal data in code are not masked, so list only checkouts whose code may leave your machine. For a Codex job, an excerpt is sent only when it provably equals the reviewed code, which only a commit review (`review --commit`) allows. The send can happen up to 10 minutes after the session that started the scan has ended, from a background process.
+- A brief can hold code and project rules. A verification part can quote test output.
+- To send less: `"routeOtherAgents": false` keeps the briefs of all agent types outside the plugin on your machine. `keepModelAgents` does the same for the agent types that it names. `"mode": "off"` sends nothing, and so does `"jevEnabled": false`, the default.
+- `jevUrl` and `ORCH_TYPESAFE_URL` change where these requests go.
+
+**To OpenAI, only while Codex is on:**
+
+- The brief of each implement task, custom review and consult question, with an instruction snapshot: your personal and project Claude instruction files and their allowed imports. `codexIncludeUserRules` and `codexIncludeProjectRules` turn off the personal part and the project part. See [Instruction snapshot](codex.md#instruction-snapshot).
+- Anything that Codex reads while it works. Its sandbox, the limits that Codex puts on its own commands, restricts where Codex can write. It does not restrict what Codex can read. So a job can read any file that your user can read, also outside the project, for example the dispatch log in `~/.claude/orchestrator/`. Write in the brief what Codex may read.
+
+**Nothing else.** The plugin keeps the dispatch log, the Codex jobs and the settings in `~/.claude/orchestrator/`, readable only by your user. A Codex job can still read them, as described above. The TypeSafe key is never written to a log.

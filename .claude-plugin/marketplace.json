@@ -1,6 +1,6 @@
 {
   "name": "claude-subagent-router",
-  "description": "Marketplace for the subagent-router plugin: routes Claude Code subagent work across Claude models and the Codex CLI.",
+  "description": "Marketplace for the subagent-router plugin: subagent workers, a review skill, a Codex CLI bridge and optional model routing for Claude Code.",
   "owner": {
     "name": "Robert Anton"
   },
@@ -8,7 +8,7 @@
     {
       "name": "subagent-router",
       "source": "./",
-      "description": "Routes subagent work across Claude models and the Codex CLI, inside the Claude Max and ChatGPT subscriptions."
+      "description": "Seven subagent workers, a review skill and a Codex CLI bridge for Claude Code, with optional model routing by Jev, a paid classifier. Codex and Jev are off by default."
     }
   ]
 }

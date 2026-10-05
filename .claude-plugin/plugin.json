@@ -1,8 +1,8 @@
 {
   "name": "subagent-router",
   "displayName": "Subagent Router",
-  "version": "0.4.1",
-  "description": "Routes subagent work across Claude models and the Codex CLI, inside the Claude Max and ChatGPT subscriptions.",
+  "version": "0.4.2",
+  "description": "Seven subagent workers, a review skill and a Codex CLI bridge for Claude Code, with optional model routing by Jev, a paid classifier. Codex and Jev are off by default.",
   "author": {
     "name": "Robert Anton"
   },
@@ -11,7 +11,8 @@
     "routing",
     "subagents",
     "codex",
-    "typesafe"
+    "typesafe",
+    "code-review"
   ],
   "userConfig": {
     "typesafe_api_key": {

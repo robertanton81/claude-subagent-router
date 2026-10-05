@@ -15,4 +15,4 @@ The plugin runs hooks inside Claude Code and starts the Codex CLI. These are in 
 - A way for the TypeSafe key or a Codex login to reach a log, a prompt or another program.
 - A way to spend Codex credits while `codexSpendCredits` is `false`.
 
-What the plugin sends to TypeSafe and to OpenAI by design is listed in the README under "What leaves your machine".
+What the plugin sends to TypeSafe and to OpenAI by design is listed in [What leaves your machine](guide/privacy.md).

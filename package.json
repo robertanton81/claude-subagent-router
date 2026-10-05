@@ -1,8 +1,8 @@
 {
   "name": "claude-subagent-router",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
-  "description": "Claude Code plugin that routes subagent work across Claude models and the Codex CLI.",
+  "description": "Seven subagent workers, a review skill and a Codex CLI bridge for Claude Code, with optional model routing by Jev, a paid classifier. Codex and Jev are off by default.",
   "type": "module",
   "license": "MIT",
   "engines": {

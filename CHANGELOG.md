@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.2
+
+Documentation:
+
+- **The README is a short landing page.** It has about 1,450 words, down from about 7,800. Each topic has its own page in `guide/`: setup, configuration, what leaves your machine, how the routing works, the limits near a plan's limit, the writer lock, Codex, TypeSafe and Jev, the report and the log, the review skill, the finding triage, the known limits and development. `REFERENCE.md` is now an index from its old sections to the new pages. No setting and no behaviour changed.
+- **The README opens with what works on a default install:** the seven workers and the review skill. Codex and model routing are optional and off by default. The old first sentence said that the plugin picks the model for each subagent task, which is true only while Jev is on. The plugin and marketplace descriptions now say the same as the README.
+- **New known limit:** agents that the Workflow tool starts never reach the routing hook. They are not routed and take no writer lock, and a Codex worker started from a workflow stops with `CODEX_FAILED no codex-request line`. See [Known limits](guide/known-limits.md).
+- The setup check and `/subagent-router:setup` point to [Setup](guide/setup.md) for the next step.
+- A new test keeps the README at or under 1,500 words. It also checks that every relative link in the shipped Markdown files reaches a file and a heading.
+
+CI:
+
+- The tests also run on Node 24 and 26. Node 20 stays in the matrix, because the plugin still supports it.
+
 ## 0.4.1
 
 Writer lock:
@@ -125,7 +139,7 @@ Documentation:
 Changes that need an action after the update:
 
 - **Jev is opt-in.** A new setting `jevEnabled`, off by default. While it is off, the hook sends no brief to TypeSafe and changes no route. To keep routing, run `node scripts/orch-config.mjs set jevEnabled=true` or `/orchestrator:configure`.
-- **The key comes only from the plugin option or `TYPESAFE_API_KEY`.** The file `~/.config/typesafe/.env` and the Keychain item `orchestrator-typesafe` are no longer read. Move the key into the plugin option; see the README section "TypeSafe and Jev". The variable `ORCH_TYPESAFE_ENV_FILE` is gone.
+- **The key comes only from the plugin option or `TYPESAFE_API_KEY`.** The file `~/.config/typesafe/.env` and the Keychain item `orchestrator-typesafe` are no longer read. Move the key into the plugin option; see [Turn on Jev](guide/setup.md#turn-on-jev). The variable `ORCH_TYPESAFE_ENV_FILE` is gone.
 
 ## 0.1.1
 

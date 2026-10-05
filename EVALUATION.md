@@ -2,7 +2,7 @@
 
 The dispatch log shows where the routing hook changed a route. It cannot show whether the other route would have been better, because only the chosen subagent ran. To answer that, the same task must run in several setups, called arms. The evaluation runner does this: it runs each task in each arm, grades each result and saves the numbers. Offline means separate from your real work: the runner starts its own Claude Code sessions on test tasks.
 
-The words dispatch log, routing hook, subagent, main session, Jev, the modes and the limit rules are explained in the [README](README.md). In this file, the worker is the Claude Code session that the runner starts for one run, not one of the plugin's workers.
+The words dispatch log, routing hook, subagent, main session, Jev, the modes and the limit rules are explained in the [README](README.md), [How the routing works](guide/routing.md) and [When a plan is near its limit](guide/usage-limits.md). In this file, the worker is the Claude Code session that the runner starts for one run, not one of the plugin's workers.
 
 Every run counts against your Claude plan. Before it starts, the runner prints the list of runs and the most they can cost. `--dry-run` stops there.
 

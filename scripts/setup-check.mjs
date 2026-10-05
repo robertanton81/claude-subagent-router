@@ -119,7 +119,7 @@ if (limits.state === "ok" && limits.fiveHour === null && limits.sevenDay === nul
 } else if (limits.state === "damaged") {
   row("WARN", "Status line log", `${limitsFile()} cannot be read (${limits.detail}), so the limit rule is off`);
 } else {
-  row("MISSING", "Status line log", `${limitsFile()} does not exist, so the limit rule is off. See README, section "Setup"`);
+  row("MISSING", "Status line log", `${limitsFile()} does not exist, so the limit rule is off. See guide/setup.md in the plugin folder, section "Add the status line log (optional)"`);
 }
 
 try {

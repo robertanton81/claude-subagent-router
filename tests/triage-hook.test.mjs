@@ -19,8 +19,11 @@ const keyLine = (edge, label) => `${DASHES}${edge} ${label}${DASHES}`;
 const keyBlock = (label, body) => [keyLine("BEGIN", label), ...Array.from({ length: body }, (_, i) => String.fromCharCode(65 + (i % 26)).repeat(64)), keyLine("END", label)];
 const codeLines = (count, from = 1) => Array.from({ length: count }, (_, i) => `code ${from + i}`);
 
+// A commit starts a detached "git maintenance run --auto". It creates and
+// deletes .git/objects/maintenance.lock, and a test that copies the repository
+// at that moment fails with ENOENT. So no git call here starts it.
 function git(args, cwd) {
-  execFileSync("git", args, { cwd, env: process.env, stdio: "pipe", timeout: 10000 });
+  execFileSync("git", ["-c", "maintenance.auto=false", ...args], { cwd, env: process.env, stdio: "pipe", timeout: 10000 });
 }
 
 function jevAnswer(choices, model = "jev-test") {

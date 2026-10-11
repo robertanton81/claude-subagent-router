@@ -1054,6 +1054,105 @@ test("a Claude writer's stop that cannot give back its lock says so, and the loc
   });
 });
 
+test("a Claude writer's stop with a transcript gives back its lock and logs its token counts", async () => {
+  await withJev({ body: jevBody({ kind: "implement", difficulty: 1 }) }, async ({ tempDir, env }) => {
+    const project = path.join(tempDir, "project");
+    fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+    const transcript = path.join(tempDir, "agent-a1.jsonl");
+    const usage = { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4 };
+    fs.writeFileSync(transcript, `${JSON.stringify({ type: "assistant", message: { id: "msg_1", model: "claude-sonnet-5-5", stop_reason: "end_turn", usage } })}\n`);
+    const subagent = (event) =>
+      runNode("scripts/log-hook.mjs", { env, stdin: JSON.stringify({ session_id: "session-1", cwd: project, agent_id: "a1", agent_type: "subagent-router:implementer", ...event }) });
+    const first = await runNode(HOOK, { stdin: agentCall({ cwd: project }), env });
+    assert.ok(!first.stdout.includes('"deny"'), first.stdout);
+    await subagent({ hook_event_name: "SubagentStart" });
+    assert.equal(readLog(tempDir).at(-1).writer_lock, "confirmed", "the writer holds the lock before its stop");
+
+    const stop = await subagent({ hook_event_name: "SubagentStop", agent_transcript_path: transcript, last_assistant_message: "Changed files: a.js" });
+    assert.deepEqual([stop.code, stop.stderr], [0, ""]);
+    const records = readLog(tempDir).filter((record) => ["stop", "usage"].includes(record.event));
+    assert.deepEqual(records.map((record) => record.event), ["stop", "usage"]);
+    assert.deepEqual([records[1].status, records[1].models["claude-sonnet-5-5"]], ["read", { messages: 1, input: 1, output: 2, cache_read: 3, cache_write: 4, stream_output: 0 }]);
+
+    const next = await runNode(HOOK, { stdin: agentCall({ cwd: project, session_id: "session-2", tool_use_id: "toolu_2" }), env });
+    assert.ok(!next.stdout.includes('"deny"'), `the lock was given back: ${next.stdout}`);
+  });
+});
+
+test("a Claude writer's lock is given back before the hook waits for the transcript", async () => {
+  await withJev({ body: jevBody({ kind: "implement", difficulty: 1 }) }, async ({ tempDir, env }) => {
+    const project = path.join(tempDir, "project");
+    fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+    // A transcript that never reaches its end, so the stop hook waits its full 2 seconds.
+    const transcript = path.join(tempDir, "agent-a1.jsonl");
+    const usage = { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+    fs.writeFileSync(transcript, `${JSON.stringify({ type: "assistant", message: { id: "msg_1", model: "claude-sonnet-5-5", stop_reason: "tool_use", usage } })}\n`);
+    const hookEnv = { ...env, ORCH_USAGE_WAIT_MS: "2000" };
+    const subagent = (event) =>
+      runNode("scripts/log-hook.mjs", { env: hookEnv, stdin: JSON.stringify({ session_id: "session-1", cwd: project, agent_id: "a1", agent_type: "subagent-router:implementer", ...event }) });
+    const first = await runNode(HOOK, { stdin: agentCall({ cwd: project }), env });
+    assert.ok(!first.stdout.includes('"deny"'), first.stdout);
+    await subagent({ hook_event_name: "SubagentStart" });
+
+    const stopping = subagent({ hook_event_name: "SubagentStop", agent_transcript_path: transcript, last_assistant_message: "Changed files: a.js" });
+    // While the stop hook still waits, its stop record is written and its lock is free.
+    const deadline = Date.now() + 1500;
+    while (!readLog(tempDir).some((record) => record.event === "stop") && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const next = await runNode(HOOK, { stdin: agentCall({ cwd: project, session_id: "session-2", tool_use_id: "toolu_2" }), env });
+    const writers = fs.readFileSync(path.join(tempDir, "data", "writers.jsonl"), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const stillWaiting = !readLog(tempDir).some((record) => record.event === "usage");
+    await stopping;
+    assert.ok(stillWaiting, "the second writer came while the stop hook was still waiting");
+    assert.ok(!next.stdout.includes('"deny"'), `the lock was free during the wait: ${next.stdout}`);
+    assert.ok(writers.some((record) => record.a === "a1" && "nw" in record), "the writer state of the stop was recorded before the wait");
+  });
+});
+
+test("after a slow lock release the transcript wait gets no time, so the hook stays inside its 5 seconds", async () => {
+  await withJev({ body: jevBody({ kind: "implement", difficulty: 1 }) }, async ({ jev, tempDir, env }) => {
+    const project = path.join(tempDir, "project");
+    fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+    // A transcript that never reaches its end.
+    const transcript = path.join(tempDir, "agent-a1.jsonl");
+    const usage = { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+    fs.writeFileSync(transcript, `${JSON.stringify({ type: "assistant", message: { id: "msg_1", model: "claude-sonnet-5-5", stop_reason: "tool_use", usage } })}\n`);
+    const hookEnv = { ...env, ORCH_USAGE_WAIT_MS: "1500" };
+    const subagent = (event) =>
+      runNode("scripts/log-hook.mjs", { env: hookEnv, stdin: JSON.stringify({ session_id: "session-1", cwd: project, agent_id: "a1", agent_type: "subagent-router:implementer", ...event }) });
+    const first = await runNode(HOOK, { stdin: agentCall({ cwd: project }), env });
+    assert.ok(!first.stdout.includes('"deny"'), first.stdout);
+    await subagent({ hook_event_name: "SubagentStart" });
+
+    // Another process holds the breaker, so the lock release waits its 3 seconds.
+    const breaker = `${writerLockPath(project, env)}.break`;
+    fs.writeFileSync(breaker, new Date().toISOString());
+    // Jev answers the verification after 3.5 seconds: too late for any budget
+    // that the hook may give it after 3 seconds of lock release.
+    jev.state.reply = { body: { model: "jev-test", answers: { outcome: { type: "choice", choice: "passed", probabilities: { passed: 1 }, confidence: 0.9 } } }, delayMs: 3500 };
+    const started = Date.now();
+    const stop = await subagent({
+      hook_event_name: "SubagentStop",
+      agent_transcript_path: transcript,
+      last_assistant_message: "Changed files: a.js\nVerification: npm test: 3 pass, 0 fail\nOpen problems: none"
+    });
+    const took = Date.now() - started;
+    fs.rmSync(breaker);
+    assert.equal(stop.code, 0);
+    // The Jev call gets only its 1-second minimum, measured from the hook's
+    // start, so the whole hook ends inside the 5 seconds that Claude Code allows.
+    const verification = readLog(tempDir).find((r) => r.event === "verification");
+    assert.equal(verification?.error, "timeout");
+    const budget = Number(/(\d+) ms$/.exec(verification.detail ?? "")?.[1]);
+    assert.ok(budget >= 1000 && budget < 1400, `the Jev call got ${verification.detail}`);
+    assert.ok(took < 5000, `the hook took ${took} ms`);
+    const record = readLog(tempDir).find((r) => r.event === "usage");
+    assert.deepEqual([record.reason, record.complete], ["no_end", false]);
+    assert.ok(record.wait_ms <= 100, `after 3 seconds of lock release the wait got no time (${record.wait_ms} ms)`);
+  });
+});
+
 test("a lock that cannot be read denies with its path, not with a wait command for the job id unknown", async () => {
   await withJev({ body: jevBody({ kind: "implement" }) }, async ({ tempDir, env }) => {
     const project = path.join(tempDir, "project");

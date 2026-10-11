@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.3
+
+Logging:
+
+- **Token counts for every subagent.** When a subagent stops, the log hook reads its transcript on your machine and adds a `usage` record with the token counts per model. Before, background launches and Workflow agents had no token count at all.
+  - Claude Code writes the last lines of a transcript a little after the stop. So the hook waits up to 1.5 seconds for the transcript's own end.
+  - The record says `read`, `partial` or `unread`, so a count that could not be read never looks like zero.
+  - On Claude Code 2.1.281 to 2.1.289, most replies that end in a tool call keep only the output count from their start. Then `output` is a lower bound, marked `stream_output`. Input and cache counts are complete.
+  - The counts cover the whole transcript. For an agent that stopped more than once, keep the newest record.
+  - The record holds no transcript path and no text. See [Log records](guide/report-and-log.md#log-records).
+
 ## 0.4.2
 
 Documentation:

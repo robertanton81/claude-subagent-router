@@ -179,7 +179,15 @@ test("the log hook writes one record for each of its three events", async () => 
       const result = await runNode("scripts/log-hook.mjs", { stdin: JSON.stringify(event), env });
       assert.deepEqual([result.code, result.stdout], [0, ""]);
     }
-    const records = readLog(tempDir);
+    const all = readLog(tempDir);
+    // These stops name no transcript, so each one also gets a usage record
+    // that says so. Its place right after the stop record is tested in
+    // transcript-usage.test.mjs.
+    assert.deepEqual(
+      all.filter((record) => record.event === "usage").map((record) => [record.agent_id, record.status, record.reason]),
+      [["a1", "unread", "no_path"], ["a2", "unread", "no_path"]]
+    );
+    const records = all.filter((record) => record.event !== "usage");
     assert.equal(records.length, 4, "a stop with an empty agent type writes no record");
     const [launched, start, stop, otherStop] = records;
     assert.deepEqual([launched.event, launched.resolved_model, launched.agent_id, launched.cwd], ["launched", "claude-haiku-4-5", "a1", "/work/project"]);
@@ -1335,8 +1343,9 @@ test("the log hook asks Jev how a worker's checks ended and logs the answer", as
     assert.deepEqual(sent.state, { verification: "npm test: 225 pass, 0 fail" });
     assert.deepEqual(Object.keys(sent.questions), ["outcome"]);
 
-    const [stop, verification] = readLog(tempDir);
+    const [stop, usage, verification] = readLog(tempDir);
     assert.equal(stop.event, "stop", "the stop record is written before the Jev call");
+    assert.equal(usage.event, "usage", "the usage record comes before the Jev call, which can take seconds");
     assert.deepEqual(
       [verification.event, verification.agent_id, verification.outcome, verification.confidence, verification.key_source],
       ["verification", "a1", "passed", 0.95, "env"]

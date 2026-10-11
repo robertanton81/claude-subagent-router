@@ -96,7 +96,7 @@ In these cases the routing hook does not route the call: the agent type and the 
 
 A call to `codex:codex-rescue` while Codex is on is not left alone. Its reason is `bypass_agent` in `enforce` mode and `would_redirect` in `shadow` mode. In `enforce` mode, the move to Claude while Codex cannot take work, or the writer lock, can then replace that reason.
 
-The hook never sees an agent that the Workflow tool starts, so such an agent has no dispatch record and no `reason`. A workflow script starts its agents without the `Agent` tool, and the hook runs only before that tool. The agent runs on the model that the script names, it takes no [writer lock](writer-lock.md#the-writer-lock), and a Codex worker gets no request line, so it stops with `CODEX_FAILED no codex-request line`. The log hook still records the agent's start and stop.
+The hook never sees an agent that the Workflow tool starts, so such an agent has no dispatch record and no `reason`. A workflow script starts its agents without the `Agent` tool, and the hook runs only before that tool. The agent runs on the model that the script names, it takes no [writer lock](writer-lock.md#the-writer-lock), and a Codex worker gets no request line, so it stops with `CODEX_FAILED no codex-request line`. The log hook still records the agent's start, its stop and its token counts.
 
 ## Direct calls to the plugin's workers
 

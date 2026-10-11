@@ -12,12 +12,16 @@ import { REVIEWER_SET, WORKER_SET, WRITER_FAMILY, loadConfig } from "./lib/confi
 import { recordWriterLaunch, recordWriterStop } from "./lib/context.mjs";
 import { countFindings, reportsNoWrite, verificationText } from "./lib/findings.mjs";
 import { appendLog, registerSecret, truncate } from "./lib/log.mjs";
+import { usageErrorRecord, usageWaitBudget, usageWaitMs, verificationBudget, waitForTranscriptUsage } from "./lib/transcript-usage.mjs";
 import { askVerification, findApiKey } from "./lib/typesafe.mjs";
 import { confirmClaudeWriterLock, releaseClaudeWriterLock } from "./lib/writer-lock.mjs";
 
-// Claude Code stops this hook after 5 seconds (hooks/hooks.json). The Jev call
-// must end well before that, whatever `jevTimeoutMs` says.
-const VERIFICATION_TIMEOUT_MS = 3000;
+// Claude Code stops this hook after 5 seconds (hooks/hooks.json). The wait for
+// the transcript and the Jev call share a budget that is measured from here, the
+// hook's start, whatever `jevTimeoutMs` says (see usageWaitBudget and
+// verificationBudget in lib/transcript-usage.mjs).
+const HOOK_STARTED = performance.now();
+const elapsedMs = () => performance.now() - HOOK_STARTED;
 
 function launchedRecord(input) {
   const response = input.tool_response ?? {};
@@ -49,6 +53,35 @@ function stopRecord(input, config) {
   return record;
 }
 
+// Logs the token counts of a finished subagent, per model, read from the
+// transcript that Claude Code names in `agent_transcript_path`. Background
+// launches and Workflow agents have no token count anywhere else. It runs after
+// the stop record, the lock release and the writer state, so a slow or broken
+// transcript never touches them. It waits a short time for the transcript's end
+// (see lib/transcript-usage.mjs). The counts cover the whole transcript, so the
+// newest record of an agent is its total; `observed_at` orders the records. The
+// record holds counts only: no transcript path, no text.
+async function logUsage(input, base) {
+  const started = performance.now();
+  let usage;
+  try {
+    usage = await waitForTranscriptUsage(input.agent_transcript_path, { maxWaitMs: usageWaitBudget(elapsedMs(), usageWaitMs()) });
+  } catch (error) {
+    // The reader returns a status for every known failure, so this is a bug.
+    usage = usageErrorRecord(error, performance.now() - started);
+  }
+  appendLog({
+    ...base,
+    event: "usage",
+    agent_id: input.agent_id ?? null,
+    agent_type: input.agent_type,
+    source: "transcript",
+    cumulative: true,
+    observed_at: new Date().toISOString(),
+    ...usage
+  });
+}
+
 // Asks Jev how the checks of a finished worker ended, and logs the answer as
 // its own record. The stop record is already written, so a slow or killed call
 // loses only this label, and the report then reads the words of the result.
@@ -69,7 +102,8 @@ async function logVerification(input, config, base) {
   registerSecret(key);
   const record = { ...base, event: "verification", agent_id: input.agent_id ?? null, agent_type: input.agent_type };
   try {
-    const answer = await askVerification(text, config, key, Math.min(config.jevTimeoutMs, VERIFICATION_TIMEOUT_MS));
+    const timeoutMs = verificationBudget(elapsedMs(), config.jevTimeoutMs);
+    const answer = await askVerification(text, config, key, timeoutMs);
     appendLog({
       ...record,
       outcome: answer.outcome,
@@ -125,6 +159,7 @@ async function main() {
         process.stderr.write("subagent-router: the writer lock of this subagent was not given back, because another process held its breaker; it counts until one hour after the subagent started\n");
       }
       recordWriterStop(base.session_id, input.agent_type, input.agent_id, reportsNoWrite(input.last_assistant_message));
+      await logUsage(input, base);
       await logVerification(input, config, base);
       break;
     default:

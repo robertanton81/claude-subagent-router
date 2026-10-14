@@ -105,12 +105,15 @@ When the routing hook moves a review from `subagent-router:reviewer` to Codex an
 
 ## Ask Codex a question
 
-For a question that is not a code review, such as a design question or a second opinion on a plan, use `consult`. The question comes on stdin, never on the command line:
+For a question that is not a code review, such as a design question or a second opinion on a plan, use `consult`. The question comes from a file or from stdin, never on the command line:
 
 ```bash
+node scripts/orch-codex.mjs consult --effort high --brief "$TMPDIR/question.md"
 node scripts/orch-codex.mjs consult --effort high < question.md
 ```
 
+- `--brief FILE` reads the question from the file. `implement` and `review --custom` take it too. The file must lie under the temp folder, and only a temp folder inside the system temp folders counts (on macOS `/tmp` and the per-user temp folder `/private/var/folders/<x>/<y>/T`, not its cache folder next to it; on Linux `/tmp` and `/var/tmp`, not `/run/user`, which holds runtime files such as a container registry login). The working folder never counts, and neither does a `TMPDIR` elsewhere, because the session or a project's settings could point either at the home folder. It must be a regular file with one hard link, it must not be a credential file (by its name or its real path) or hold a private key, and stdin must then carry no text. The file is opened so that a link in any part of its path refuses the open, even a folder that another process swaps for a link after the checks: on macOS 11 or newer with `O_NOFOLLOW_ANY`, on Linux by checking the opened file's name in `/proc/self/fd`. On any other system `--brief` is refused, and the text goes on stdin. A call with `< FILE` can never leave Claude Code's [Bash sandbox](https://code.claude.com/docs/en/sandboxing); a call with `--brief FILE` and no redirect can, when an entry in `sandbox.excludedCommands` covers it. The plugin's own entries cover only the worker commands, so a `consult` normally stays inside the sandbox. See [The Claude sandbox](#the-claude-sandbox) for an owner who excludes it on purpose.
+- The command removes `CODEX_API_KEY` and `OPENAI_API_KEY` from its own environment before the runner starts, and says so on stderr. So no `env -u` is needed in front of it, and Codex always uses the ChatGPT login.
 - Codex works in the project folder in the `read-only` sandbox, with the same settings as a review. It can also read files outside the project, and what it reads goes to OpenAI.
 - A consult takes no writer lock, so it can run while a writer changes the checkout. The files that it reads can change while it reads them.
 - The question gets the instruction snapshot and a short contract: the final message must hold the whole answer. The answer comes back whole, with the same rule for a long earlier message as a custom review.
@@ -118,6 +121,39 @@ node scripts/orch-codex.mjs consult --effort high < question.md
 - `wait`, `cancel`, `--model`, `--effort` and `--wait` work as for the other commands. `consult` takes no review scope.
 - The routing hook never sends a task to `consult`. It is for the main session and for manual use.
 - It uses the ChatGPT plan like every Codex job, with the same checks for a used-up plan and for credits.
+
+## The Claude sandbox
+
+When Claude Code's [Bash sandbox](https://code.claude.com/docs/en/sandboxing) is on, a Codex worker cannot write the router's data folder `~/.claude/orchestrator`, because the sandbox denies writes to the Claude config folder. The worker then stops at once with `CODEX_FAILED usage error: the request ... could not be claimed (EPERM)`. No job starts, and the request stays as it was. The main session does the task with a Claude worker instead.
+
+To let the worker commands leave the sandbox, the owner adds entries to `sandbox.excludedCommands` in `~/.claude/settings.json`. An excluded command runs with the owner's full access. So an entry is safe only for a plugin copy that no sandboxed command can change. Two kinds of copy qualify:
+
+- **A copy in the plugin cache.** A marketplace that Claude Code copies, such as the GitHub marketplace, installs the plugin into `~/.claude/plugins/cache/`, and the sandbox denies writes there for every session. The path holds the version, so the entries need the new path after each plugin update. Your user owns this copy, so it is only as safe as every program that runs with your rights: a command that you approve outside the sandbox could change it. Only the cache in `~/.claude` counts, even when `CLAUDE_CONFIG_DIR` names another folder, because an environment value must not choose what is trusted.
+- **A copy that root owns.** For example, a release clone under `/opt/` that a `directory` marketplace points to. Root must own the folder, every folder above it and every file in the copy (`.git` included), and no group or other user may write any of them. A release then is a `sudo git checkout <tag>` in that clone, and the entries keep their path. This is the stronger choice: no program that runs with your rights can change the copy.
+
+Never exclude a working checkout. A `directory` marketplace loads the plugin in place, so `CLAUDE_PLUGIN_ROOT` is the folder it points to. When that folder is a checkout, a session in it can change code that would then run with full access. The same is true for `claude --plugin-dir`.
+
+Exclude only `run`, `wait` and `cancel`, never the whole script with one `*`. These three read only what the routing hook stored. The other commands (`implement`, `review`, `consult`) take a task text and a file from the session, so they stay inside the sandbox. An owner can still exclude `consult` for one protected copy, as a deliberate choice: the session then picks which file under the temp folder goes to Codex. The `--brief` reader refuses credential names, private keys and links in the path, but not every private file. The setup check warns about an entry that lets these commands out.
+
+The entries hold the path that Claude Code fills in for `${CLAUDE_PLUGIN_ROOT}`, with the same quotes as the worker's call. An entry with the text `${CLAUDE_PLUGIN_ROOT}` in it matches no worker call, because the worker's command already holds the path. Do not put a `*` inside the path: in these entries a `*` matches any text, `../` included. For a copy at `/opt/subagent-router`, the entries are:
+
+```json
+{
+  "sandbox": {
+    "excludedCommands": [
+      "node \"/opt/subagent-router/scripts/orch-codex.mjs\" run *",
+      "node \"/opt/subagent-router/scripts/orch-codex.mjs\" wait *",
+      "node \"/opt/subagent-router/scripts/orch-codex.mjs\" cancel *"
+    ]
+  }
+}
+```
+
+- `node scripts/setup-check.mjs` says whether the running copy qualifies and whether these entries are in the user, managed or project settings. It warns when an entry names a copy that does not qualify, also an entry that a cloned project's `.claude/settings.json` brings along. It reads the settings only. It cannot prove that a call leaves the sandbox.
+- For a copy that qualifies, the worker's error message prints the exact entries. For a copy that does not, it says why and offers none.
+- An excluded command still goes through the normal permission check. In Manual mode, a prompt titled "Bash command (unsandboxed)" confirms that an entry matched.
+- The environment is part of the boundary. The excluded script starts `node` from `PATH` and inherits the session's environment, so `NODE_OPTIONS`, `ORCH_DATA_DIR` and `ORCH_CODEX_BIN` reach it. A sandboxed command cannot set them for a later call: a leading `NAME=value` or an `export` in the same call keeps the call sandboxed. But your shell start-up files and a project's `env` setting can set them, so trust a project's settings before you open it, as you would for its hooks.
+- Its git calls turn off the repository's fsmonitor, hooks, pager and filter drivers, and `git status` does not look into submodules. One gap remains: a filter driver added to the repository's config during a call is not turned off. The sandbox denies that write in the session's own folder.
 
 ## Long Codex runs and failures
 

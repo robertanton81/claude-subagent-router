@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.4
+
+Codex and the Claude sandbox:
+
+- **`--brief FILE`** for `implement`, `review --custom` and `consult`. It reads the task text from a file argument. A call with a `< FILE` redirect can never leave the sandbox; a call with `--brief FILE` can, when an owner excludes it on purpose. The plugin's own entries cover only `run`, `wait` and `cancel`. The file must lie in a system temp folder (`/tmp`, `/var/tmp`, or the per-user temp folder of macOS; the working folder and a `TMPDIR` elsewhere never count), must be a regular file with one hard link, must not be a credential file by its name or its real path, and must not hold a private key. It is opened so that a link in any part of its path refuses the open, also a folder swapped for a link after the checks (macOS 11 or newer: `O_NOFOLLOW_ANY`; Linux: the opened file's name in `/proc/self/fd`). On other systems `--brief` is refused.
+- **The script removes `CODEX_API_KEY` and `OPENAI_API_KEY` itself**, so no `env -u` wrapper is needed. A call that starts with `env` never leaves the sandbox.
+- **A worker inside the sandbox stops with a clear message.** When the request claim fails with a permission error, `run` says that no job started and that the request is unchanged, and tells the main session to use a Claude worker. For a protected copy it prints the exact `sandbox.excludedCommands` entries. For a working checkout it explains why the copy must not leave the sandbox. See [The Claude sandbox](guide/codex.md#the-claude-sandbox).
+- **The setup check reports the worker exclusion:** whether the running copy is protected (in the plugin cache, or owned by root up to `/`) and whether the entries for `run`, `wait` and `cancel` are in the user, managed or project settings. It warns about an entry that names a copy a session can change, an entry that also lets `implement`, `review` or `consult` out, an entry with the unexpanded `${CLAUDE_PLUGIN_ROOT}`, and a settings file that is not valid JSON.
+- **Fixed: an entry with the text `${CLAUDE_PLUGIN_ROOT}` matches no worker call.** Claude Code fills in the path before the worker writes its command, so the entry must hold the filled-in path.
+
+Security:
+
+- **Git calls ignore a repository's own programs.** The Codex bridge runs git in the project checkout, and with a sandbox exclusion it runs outside the sandbox. Every call now turns off `core.fsmonitor` (a helper program that git can start during `git status`), the hooks path and the pager, and blanks every configured filter driver (a program that git runs on a file's content: clean, smudge and process). `git status` does not look into submodules. A driver name with `=` in it cannot be blanked, so git refuses to run for such a repository.
+
 ## 0.4.3
 
 Logging:

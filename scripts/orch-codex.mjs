@@ -8,15 +8,21 @@
 //   orch-codex.mjs cancel <job id>
 //     Stops a running job and frees the writer lock of its folder.
 //
-// For manual use and for the tests, the task text can also come from stdin:
-//   orch-codex.mjs implement [--model M] [--effort E] [--wait S]
+// For manual use and for the tests, the task text comes from stdin or from a file:
+//   orch-codex.mjs implement [--brief FILE] [--model M] [--effort E] [--wait S]
 //   orch-codex.mjs review [--uncommitted | --base B | --commit SHA | --custom]
-//                         [--model M] [--effort E] [--wait S]
-//     With a scope flag, Codex reviews that diff with its own rules and does not see stdin.
-//     With --custom, Codex gets the text on stdin as its review instructions and no scope flag.
-//   orch-codex.mjs consult [--model M] [--effort E] [--wait S]
+//                         [--brief FILE] [--model M] [--effort E] [--wait S]
+//     With a scope flag, Codex reviews that diff with its own rules and takes no task text.
+//     With --custom, Codex gets the text as its review instructions and no scope flag.
+//   orch-codex.mjs consult [--brief FILE] [--model M] [--effort E] [--wait S]
 //     Asks Codex a question that is not a code review, such as a design question.
 //     Codex reads the project in a read-only sandbox and takes no writer lock.
+//
+// --brief FILE reads the task text from FILE instead of stdin. A call with the
+// option and no redirect can match an entry of Claude Code's sandbox setting
+// excludedCommands; a call with `< FILE` never leaves the sandbox. The file must
+// lie under the system temp folder, because an excluded call runs with the
+// user's full access and the text goes to Codex.
 //
 // A Codex task can run longer than the 10-minute maximum of the Bash tool.
 // So the job runs as a detached process, and this command only waits for it.
@@ -25,17 +31,22 @@
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import tty from "node:tty";
 import { fileURLToPath } from "node:url";
 
 import { claudeRules } from "./lib/claude-rules.mjs";
-import { UsageError, briefContract, parseOptions, runsReadOnlyExec, sendsBriefToCodex } from "./lib/codex-args.mjs";
+import { UsageError, briefContract, parseOptions, runsReadOnlyExec, sendsBriefToCodex, stripCodexApiKeys } from "./lib/codex-args.mjs";
+import { holdsPrivateKey, isSensitivePath } from "./lib/secret-patterns.mjs";
 import { isUsageLimitMessage } from "./lib/codex-availability.mjs";
 import { earlierLongMessages, readEvents } from "./lib/codex-events.mjs";
 import { readLimitsOfThread } from "./lib/codex-limits.mjs";
 import { REQUEST_ID_PATTERN, claimRequest, recordJobOfRequest, restoreRequest } from "./lib/codex-request.mjs";
 import { dataDir, loadConfig } from "./lib/config.mjs";
 import { ensurePrivateDir } from "./lib/log.mjs";
+import { briefOpenRefusal, openWithoutLinks, systemTempFolder } from "./lib/open-no-links.mjs";
+import { claimRefusedMessage, isPermissionError } from "./lib/protected-copy.mjs";
 import { resolveCommitWithReason, worktreeDirty } from "./lib/evidence.mjs";
 import { removeSweepSince, sharedEnv, sweepSince } from "./lib/sweep.mjs";
 import { triageOn } from "./lib/triage-core.mjs";
@@ -55,20 +66,140 @@ import {
 
 const SELF = fileURLToPath(import.meta.url);
 const RUNNER = path.join(path.dirname(SELF), "codex-job-runner.mjs");
+const PLUGIN_ROOT = path.dirname(path.dirname(SELF));
 const DEFAULT_WAIT_SECONDS = 540;
 const KEEP_MS = 14 * 24 * 3600 * 1000;
 const JOB_ID_PATTERN = /^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$/;
 
+// The text on stdin, read to its end. tty.isatty does not touch process.stdin:
+// reading process.stdin.isTTY creates Node's stdin stream, which turns fd 0
+// non-blocking, and a read that came before the caller's text then failed with
+// EAGAIN. The old catch turned that into an empty text, so a slow pipe gave
+// "needs a brief" (seen on a macOS CI runner). EAGAIN from a pipe that a caller
+// opened non-blocking waits a moment and reads again. Only a missing stdin
+// (EBADF) counts as no text; any other error stays visible.
 function readStdin() {
-  if (process.stdin.isTTY) {
+  if (tty.isatty(0)) {
     return "";
+  }
+  const chunks = [];
+  const buffer = Buffer.alloc(65536);
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    let count;
+    try {
+      count = fs.readSync(0, buffer, 0, buffer.length, null);
+    } catch (error) {
+      if (error.code === "EAGAIN") {
+        Atomics.wait(pause, 0, 0, 10);
+        continue;
+      }
+      if (error.code === "EBADF") return "";
+      throw error;
+    }
+    if (count === 0) break;
+    chunks.push(Buffer.from(buffer.subarray(0, count)));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+// The folders a brief file may come from: the temp folders where a session
+// writes its briefs, never the working folder. The session picks its working
+// folder, and the environment picks os.tmpdir() (TMPDIR): either at the home
+// folder would make every file under it, token stores included, a possible
+// brief. So a folder counts only when its real path is a system temp folder
+// (systemTempFolder). Real paths, so a link cannot point elsewhere.
+function briefRoots() {
+  const roots = new Set();
+  for (const folder of [os.tmpdir(), "/tmp"]) {
+    let real;
+    try {
+      real = fs.realpathSync(folder);
+    } catch {
+      // A folder that does not exist on this machine cannot hold the file.
+      continue;
+    }
+    if (systemTempFolder(real)) roots.add(real);
+  }
+  return [...roots];
+}
+
+function readBriefFile(file, cwd) {
+  const given = path.resolve(cwd, file);
+  // A credential file must never become a brief: its whole content would go to
+  // Codex. The instruction collector refuses the same conventional names. This
+  // runs before any file is opened, so a refused path is never even read.
+  if (isSensitivePath(given)) {
+    throw new UsageError(`--brief: ${file} looks like a credential file, which must not be sent as a brief`);
+  }
+  // Resolve links and check the real location and name before opening anything,
+  // so a file outside the allowed folders is refused without a read.
+  let real;
+  try {
+    real = fs.realpathSync(given);
+  } catch (error) {
+    throw new UsageError(`--brief: the file ${file} cannot be read: ${error.message}`);
+  }
+  if (isSensitivePath(real)) {
+    throw new UsageError(`--brief: ${file} resolves to a credential file, which must not be sent as a brief`);
+  }
+  const roots = briefRoots();
+  if (roots.length === 0) {
+    throw new UsageError(`--brief: no temp folder of this system lies in a system temp folder (TMPDIR is ${os.tmpdir()}), so no brief file can be read. Give the text on stdin instead`);
+  }
+  if (!roots.some((root) => real === root || real.startsWith(`${root}${path.sep}`))) {
+    throw new UsageError(`--brief: ${file} lies outside the temp folder. Put the brief under one of these: ${roots.join(", ")}`);
+  }
+  // Open the resolved real path, not the name. This command can run outside the
+  // sandbox, so a concurrent process must not be able to swap the checked path,
+  // or any folder in it, for a link between the check and the open (a
+  // time-of-check/time-of-use race). openWithoutLinks refuses a link in any
+  // part of the path at the moment of the open, and opens without blocking on
+  // a named pipe (FIFO); the file-type check below then rejects a pipe. The
+  // read is through the descriptor, so it is the file that was just checked.
+  let fd;
+  try {
+    fd = openWithoutLinks(real);
+  } catch (error) {
+    throw new UsageError(briefOpenRefusal(error, file));
   }
   try {
-    return fs.readFileSync(0, "utf8");
-  } catch {
-    // No stdin was attached to this call.
-    return "";
+    const opened = fs.fstatSync(fd);
+    if (!opened.isFile()) {
+      throw new UsageError(`--brief: ${file} is not a regular file`);
+    }
+    // A second hard link is the one way to make a file from elsewhere look like
+    // a file under the allowed folders, because a real path does not show it.
+    if (opened.nlink > 1) {
+      throw new UsageError(`--brief: ${file} has more than one hard link, so it may be a file from elsewhere. Copy it instead.`);
+    }
+    let text;
+    try {
+      text = fs.readFileSync(fd, "utf8");
+    } catch (error) {
+      throw new UsageError(`--brief: the file ${file} cannot be read: ${error.message}`);
+    }
+    // A brief that holds a private key, whatever its name, is held back too.
+    if (holdsPrivateKey(text)) {
+      throw new UsageError(`--brief: ${file} holds what looks like a private key, which must not be sent as a brief`);
+    }
+    return text;
+  } finally {
+    fs.closeSync(fd);
   }
+}
+
+// The task text of a manual implement, review or consult: from --brief FILE, or
+// from stdin. Both at once is a mistake, so it is refused.
+function readBrief(options, cwd) {
+  const fromStdin = readStdin();
+  if (options.briefFile === null) {
+    return fromStdin;
+  }
+  if (fromStdin.trim().length > 0) {
+    throw new UsageError("--brief and stdin both carry a task text. Give the text in one of them.");
+  }
+  return readBriefFile(options.briefFile, cwd);
 }
 
 function newJobId() {
@@ -519,7 +650,18 @@ async function jobDirOfRequest(id) {
   }
   // A second `run` for the same request must not start a second Codex job.
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    const claim = claimRequest(id);
+    let claim;
+    try {
+      claim = claimRequest(id);
+    } catch (error) {
+      // Inside the Claude sandbox the claim rename fails with EPERM, before any
+      // job starts. The text says what the owner can do, and it never asks to
+      // exclude a copy that a session can change.
+      if (isPermissionError(error)) {
+        throw new UsageError(claimRefusedMessage(id, error.code, PLUGIN_ROOT));
+      }
+      throw error;
+    }
     if (claim.request) {
       const request = claim.request;
       if (Array.isArray(request.directive_errors) && request.directive_errors.length > 0) {
@@ -565,11 +707,23 @@ async function jobDirOfRequest(id) {
 }
 
 async function main() {
+  // Before anything else, so neither the runner nor Codex ever sees an API key.
+  // The caller then needs no `env -u` in front of this command.
+  const removedKeys = stripCodexApiKeys(process.env);
+  if (removedKeys.length > 0) {
+    process.stderr.write(`subagent-router: ${removedKeys.join(" and ")} removed from the environment of this run, because Codex must use the ChatGPT login\n`);
+  }
+
   const [command, ...rest] = process.argv.slice(2);
   const options = parseOptions(rest);
   const waitSeconds = options.waitSeconds ?? waitSecondsFromEnv();
 
   let dir;
+  if (command === "run" || command === "wait" || command === "cancel") {
+    if (options.briefFile !== null) {
+      throw new UsageError("--brief applies to implement, review and consult only");
+    }
+  }
   if (command === "run") {
     dir = await jobDirOfRequest(options.positionals[0]);
   } else if (command === "wait") {
@@ -579,12 +733,15 @@ async function main() {
     return;
   } else if (command === "implement" || command === "review" || command === "consult") {
     if (options.positionals.length > 0) {
-      throw new UsageError(`unexpected argument "${options.positionals[0]}". The task text comes from stdin.`);
+      throw new UsageError(`unexpected argument "${options.positionals[0]}". The task text comes from stdin or from --brief FILE.`);
     }
     if (command === "consult" && options.scope) {
       throw new UsageError("consult takes no review scope. Use review for a review of a diff.");
     }
-    dir = startJob({ kind: command, model: options.model, effort: options.effort, scope: options.scope, brief: readStdin(), cwd: process.cwd() });
+    if (command === "review" && options.briefFile !== null && options.scope?.type !== "custom") {
+      throw new UsageError("review reads a brief only with --custom. A review with a scope flag takes no task text.");
+    }
+    dir = startJob({ kind: command, model: options.model, effort: options.effort, scope: options.scope, brief: readBrief(options, process.cwd()), cwd: process.cwd() });
   } else {
     throw new UsageError("the command must be run, wait, cancel, implement, review or consult");
   }

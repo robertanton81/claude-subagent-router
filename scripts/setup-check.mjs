@@ -4,10 +4,14 @@
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { FIXED_MODEL_AGENTS, dataDir, loadConfig } from "./lib/config.mjs";
 import { limitsFile, readLimitsState } from "./lib/context.mjs";
 import { logFile, readLogTail } from "./lib/log.mjs";
+import { broadEntries, copyProtection, deadVariableEntries, sandboxRows, workerCoverage } from "./lib/protected-copy.mjs";
 import { codexPlatformSupported, codexState, describeTime } from "./lib/provider-state.mjs";
 import { askJev, findApiKey } from "./lib/typesafe.mjs";
 
@@ -69,6 +73,50 @@ if (config.codexEnabled && !codexPlatformSupported()) {
     const routing = config.mode === "enforce" ? "the routing sends no tasks to Codex, and " : "";
     const runner = planUsedUp ? "the runner starts no Codex job" : "the runner starts no Codex job unless codexSpendCredits is true";
     row("WARN", "Codex capacity", `${why}. Until ${describeTime(codex.until)}, ${routing}${runner}`);
+  }
+}
+// In a session with the Claude sandbox on, a Codex worker can write the
+// router's data folder only through an owner's sandbox exclusion entry. An
+// entry is safe only for a protected copy (scripts/lib/protected-copy.mjs).
+// This reads sandbox.excludedCommands from the user, managed and project
+// settings, and no other value. A cloned project can carry its own entries, so
+// they count too. It does not prove that a call leaves the sandbox.
+if (config.codexEnabled && codexPlatformSupported()) {
+  const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+  const settingsFiles = [
+    path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "settings.json"),
+    "/Library/Application Support/ClaudeCode/managed-settings.json",
+    "/etc/claude-code/managed-settings.json",
+    path.join(process.cwd(), ".claude", "settings.json"),
+    path.join(process.cwd(), ".claude", "settings.local.json")
+  ];
+  const listed = [];
+  const unreadable = [];
+  for (const file of settingsFiles) {
+    let text;
+    try {
+      text = fs.readFileSync(file, "utf8");
+    } catch (error) {
+      // A missing settings file adds no entries. A file that this user cannot
+      // read is one that Claude Code, which runs as the same user, cannot read
+      // either, so a permission error stays silent too.
+      if (!["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(error.code)) {
+        unreadable.push({ file, code: error.code ?? error.name });
+      }
+      continue;
+    }
+    try {
+      const entries = JSON.parse(text)?.sandbox?.excludedCommands;
+      if (Array.isArray(entries)) listed.push(...entries);
+    } catch {
+      // The parse error quotes part of the text, so the row names the file only.
+      unreadable.push({ file, json: true });
+    }
+  }
+  const { kind, problem } = copyProtection(root);
+  const sandbox = sandboxRows({ root, kind, problem, coverage: workerCoverage(root, listed), dead: deadVariableEntries(listed), broad: broadEntries(root, listed), unreadable });
+  for (const [status, detail] of sandbox) {
+    row(status, "Codex worker sandbox", detail);
   }
 }
 for (const name of ["OPENAI_API_KEY", "CODEX_API_KEY"]) {

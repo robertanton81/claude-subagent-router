@@ -42,6 +42,48 @@ function gitEnv() {
   return Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_") && !KEY_VARIABLE.test(name)));
 }
 
+// The settings in an untrusted checkout's own .git/config that can make git run
+// a program. A session that can commit can write them; this code may run
+// outside the Claude sandbox (through a sandbox exclusion), so git must not
+// obey them. A command-line -c overrides the repository's config, so these
+// stand in front of every git call. core.fsmonitor is the live one for the
+// read-only commands here (status reads it); the hooks path and the pager are
+// disabled as defence, although these commands run no hook and, with piped
+// output, start no pager.
+const GIT_SAFE_CONFIG = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.pager=cat"];
+
+// A filter driver is one more program that config can name: git status runs a
+// driver's clean or process command on a changed file whose attributes select
+// it, and a session can write .gitattributes. So every driver that any config
+// scope names is blanked on the command line. git config itself runs no
+// program. Exit code 1 means that no driver is configured. Any other failure
+// throws, so the caller treats git as failed and runs nothing. A blanked Git LFS
+// filter can make LFS files look changed, so dirty can be true for them.
+function filterGuard(cwd) {
+  let keys;
+  try {
+    keys = execFileSync("git", [...GIT_SAFE_CONFIG, "config", "--name-only", "--get-regexp", "^filter\\."], { cwd, env: gitEnv(), encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "pipe"] });
+  } catch (error) {
+    if (error?.status === 1 && !error.signal) return [];
+    throw error;
+  }
+  const names = new Set(keys.split("\n").map((key) => key.trim()).filter(Boolean).map((key) => key.slice("filter.".length, key.lastIndexOf("."))).filter(Boolean));
+  // git splits "-c key=value" at the first "=", so a driver name with "=" in it
+  // cannot be blanked this way. Refuse to run git at all for such a repository.
+  // The code lets gitError name this reason instead of a plain "failed".
+  for (const name of names) {
+    if (name.includes("=")) throw Object.assign(new Error("a git filter driver name holds \"=\""), { code: "FILTER_DRIVER_NAME" });
+  }
+  // A driver added between this listing and the git call is not blanked. That
+  // needs a write to the repository's config during the call, which the Claude
+  // sandbox denies for the session's own folder.
+  return [...names].flatMap((name) => ["-c", `filter.${name}.clean=`, "-c", `filter.${name}.smudge=`, "-c", `filter.${name}.process=`, "-c", `filter.${name}.required=false`]);
+}
+
+function safeConfig(cwd) {
+  return [...GIT_SAFE_CONFIG, ...filterGuard(cwd)];
+}
+
 // True when the text holds anything that findCitations could read as a
 // location: a Markdown link, a ticked path or a bare one, also a file name
 // without an extension (Dockerfile:12).
@@ -50,11 +92,12 @@ export function hasCitationShape(text) {
 }
 
 function git(args, cwd) {
-  return execFileSync("git", args, { cwd, env: gitEnv(), encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  return execFileSync("git", [...safeConfig(cwd), ...args], { cwd, env: gitEnv(), encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
 function gitError(error) {
   if (error?.code === "ENOENT") return "git_missing";
+  if (error?.code === "FILTER_DRIVER_NAME") return "filter_driver_name";
   if (error?.code === "ETIMEDOUT" || error?.signal === "SIGTERM") return "timeout";
   const stderr = String(error?.stderr ?? "");
   if (/not a git repository/i.test(stderr)) return "not_a_repo";
@@ -83,7 +126,9 @@ export function repoState(cwd) {
     // Shared by every worktree of one repository, so it names the repository.
     commonDir = fs.realpathSync(path.resolve(root, git(["rev-parse", "--git-common-dir"], root)));
     const head = git(["rev-parse", "--verify", "HEAD"], root);
-    const dirty = git(["status", "--porcelain"], root) !== "";
+    // A submodule's own config could name a filter that the guard did not list,
+    // so status does not look into submodules.
+    const dirty = git(["status", "--porcelain", "--ignore-submodules=all"], root) !== "";
     return { root: fs.realpathSync(root), commonDir, head, dirty, error: null };
   } catch (error) {
     // A repository without a commit still has a root, so citations still work.
@@ -124,7 +169,7 @@ export function resolveCommit(cwd, rev) {
 // True when the checkout has uncommitted changes, null when git cannot say.
 export function worktreeDirty(cwd) {
   try {
-    return git(["status", "--porcelain"], cwd) !== "";
+    return git(["status", "--porcelain", "--ignore-submodules=all"], cwd) !== "";
   } catch {
     return null;
   }
@@ -326,7 +371,7 @@ function inOwnCheckout(root, file) {
 function notIgnored(root, file) {
   const relative = path.relative(root, file).split(path.sep).join("/");
   try {
-    execFileSync("git", ["check-ignore", "-q", "--", relative], { cwd: root, env: gitEnv(), timeout: 2000, stdio: "ignore" });
+    execFileSync("git", [...safeConfig(root), "check-ignore", "-q", "--", relative], { cwd: root, env: gitEnv(), timeout: 2000, stdio: "ignore" });
     return false;
   } catch (error) {
     if (error?.status === 1 && !error.signal) return true;

@@ -14,7 +14,7 @@ export function isSensitivePath(name) {
   return (
     segments.some((part) => [".git", ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure"].includes(part)) ||
     /[/\\]\.config[/\\](?:gh|gcloud)[/\\]/.test(name) ||
-    /^(?:\.env(?:[.-].*)?|\.envrc|\.credentials(?:\..*)?|credentials(?:\.(?:json|toml|ya?ml|ini|xml))?|secrets\..+|service[-_]?account.*\.json|\.npmrc|\.netrc|\.git-credentials|\.pypirc|\.pgpass|\.htpasswd|\.dockercfg|\.vault-token|\.my\.cnf|\.s3cfg|id_(?:rsa|ed25519|ecdsa|dsa))$|\.(?:env|pem|key|p8|p12|pfx|ppk|tfstate|tfvars|jks|keystore|kdbx|gpg)$/i.test(path.basename(name))
+    /^(?:\.env(?:[.-].*)?|\.envrc|\.credentials(?:\..*)?|credentials(?:\.(?:json|toml|ya?ml|ini|xml))?|secrets\..+|service[-_]?account.*\.json|\.npmrc|\.netrc|\.git-credentials|\.pypirc|\.pgpass|\.htpasswd|\.dockercfg|\.vault-token|auth\.json|\.my\.cnf|\.s3cfg|id_(?:rsa|ed25519|ecdsa|dsa))$|\.(?:env|pem|key|p8|p12|pfx|ppk|tfstate|tfvars|jks|keystore|kdbx|gpg)$/i.test(path.basename(name))
   );
 }
 

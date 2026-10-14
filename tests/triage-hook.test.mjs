@@ -322,7 +322,9 @@ test("a failed ignore check sends nothing, and the hook still ends normally", { 
   // A git stand-in whose "check-ignore" fails; every other command goes to the real git.
   const bin = path.join(s.tempDir, "bin");
   fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, "git"), `#!/bin/sh\nif [ "$1" = "check-ignore" ]; then exit 128; fi\nexec '${realGit()}' "$@"\n`, { mode: 0o755 });
+  // The subcommand is no longer the first argument: evidence.mjs puts safety
+  // `-c` config in front of it, so scan all arguments for "check-ignore".
+  fs.writeFileSync(path.join(bin, "git"), `#!/bin/sh\nfor a in "$@"; do if [ "$a" = "check-ignore" ]; then exit 128; fi; done\nexec '${realGit()}' "$@"\n`, { mode: 0o755 });
   const run = await runNode("scripts/triage-hook.mjs", { stdin: stopInput(s), env: { ...s.env, PATH: `${bin}${path.delimiter}${s.env.PATH}` }, cwd: s.repo });
   assert.equal(run.code, 0);
   assert.equal(run.stdout, "");

@@ -400,7 +400,7 @@ test("a commit review of an older commit is checked against that commit, not tod
   assert.deepEqual(outcomes(doneOf(s, stale)), ["stale_evidence"]);
 });
 
-test("git never sees the key, also when a repository's settings run a program", async (t) => {
+test("a repository's settings cannot make git run a program, so none can read the key", async (t) => {
   const s = await setUp(t);
   const out = path.join(s.tempDir, "fsmonitor-env.txt");
   const script = path.join(s.tempDir, "fsmonitor.sh");
@@ -408,8 +408,12 @@ test("git never sees the key, also when a repository's settings run a program", 
   git(["config", "core.fsmonitor", script], s.repo);
   addJob(s);
   await worker(s);
-  assert.ok(fs.existsSync(out), "positive control: git ran the repository's program");
-  assert.equal(fs.readFileSync(out, "utf8").includes(KEY), false);
+  // Every git call puts `-c core.fsmonitor=false` in front, which a repository's
+  // own config cannot override, so the program never runs. A program that could
+  // run during the sweep would run outside the sandbox with the owner's access
+  // once the sweep is reached through a sandbox exclusion, which stripping the
+  // key from git's environment alone would not stop.
+  assert.equal(fs.existsSync(out), false, "the repository's core.fsmonitor program must not run");
 });
 
 test("the budget counts only claimed jobs: refused jobs never starve an allowed one; one run takes at most 25", async (t) => {
@@ -788,11 +792,12 @@ test("a revision that looks like an option is never passed to git", () => {
 
 // --- Round 2 of the implementation review ---
 
-test("a worker started by the launcher has no key in its environment, so a repository's program cannot read it", async (t) => {
+test("a worker started by the launcher does the job with the key, and a repository's program never runs", async (t) => {
   const s = await setUp(t);
   const out = path.join(s.tempDir, "parents-env.txt");
   const script = path.join(s.tempDir, "fsmonitor.sh");
-  // The program reads the environment of git and of git's parent, the worker.
+  // Were it to run, the program would read the environment of git and of git's
+  // parent, the worker. It must not run at all.
   fs.writeFileSync(
     script,
     `#!/bin/sh\ngp=$(ps -o ppid= -p $PPID | tr -d ' ')\nfor p in $PPID $gp; do\n  if [ -r /proc/$p/environ ]; then tr '\\0' '\\n' < /proc/$p/environ; else ps -E -ww -o command= -p $p; fi\ndone >> "${out}"\nexit 1\n`,
@@ -803,9 +808,9 @@ test("a worker started by the launcher has no key in its environment, so a repos
   await launcher(s, { CLAUDE_PLUGIN_OPTION_TYPESAFE_API_KEY: KEY });
   assert.ok(await waitFor(() => doneOf(s, id) !== null), "the worker did the job with the key it got through the pipe");
   assert.deepEqual(outcomes(doneOf(s, id)), ["supports"]);
-  const dumped = fs.readFileSync(out, "utf8");
-  assert.match(dumped, /PATH=/, "positive control: the program read the environments");
-  assert.equal(dumped.includes(KEY), false);
+  // core.fsmonitor is disabled on every git call, so the repository's program
+  // never runs and reads neither the worker's environment nor git's.
+  assert.equal(fs.existsSync(out), false, "the repository's core.fsmonitor program must not run");
 });
 
 test("the worker follows the shared settings, never one session's address for Jev", async (t) => {

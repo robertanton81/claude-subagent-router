@@ -38,11 +38,28 @@ export const CONSULT_CONTRACT = ["", "---", FINAL_MESSAGE_RULE, ""].join("\n");
 
 export const JOB_KINDS = new Set(["implement", "review", "consult"]);
 
+// An API key in the environment would win over the saved ChatGPT login and move
+// a run to paid API billing. The command line removes these variables before
+// the runner starts, and the runner removes them again before Codex starts.
+export const CODEX_API_KEY_VARIABLES = ["CODEX_API_KEY", "OPENAI_API_KEY"];
+
+// Removes the API keys from `env` in place. Returns the names that were set.
+export function stripCodexApiKeys(env) {
+  const removed = [];
+  for (const name of CODEX_API_KEY_VARIABLES) {
+    if (env[name] !== undefined) {
+      delete env[name];
+      removed.push(name);
+    }
+  }
+  return removed;
+}
+
 export class UsageError extends Error {}
 
 // Reads the flags after the command word. Returns a plain options object.
 export function parseOptions(argv) {
-  const options = { model: null, effort: null, waitSeconds: null, scope: null, positionals: [] };
+  const options = { model: null, effort: null, waitSeconds: null, scope: null, briefFile: null, positionals: [] };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const next = () => {
@@ -73,6 +90,12 @@ export function parseOptions(argv) {
         options.waitSeconds = seconds;
         break;
       }
+      case "--brief":
+        options.briefFile = next();
+        if (options.briefFile === "") {
+          throw new UsageError("--brief needs the path of a file");
+        }
+        break;
       case "--uncommitted":
         options.scope = { type: "uncommitted" };
         break;

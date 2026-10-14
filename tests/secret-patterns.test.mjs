@@ -12,7 +12,7 @@ const DASHES = "-".repeat(5);
 const pem = (edge, label) => `${DASHES}${edge} ${label}${DASHES}`;
 
 test("credential files and folders count as sensitive", () => {
-  for (const name of ["a/.ssh/config", "x/.aws/credentials", "/h/.config/gh/hosts.yml", ".env", ".env.local", "id_ed25519", "deploy.pem", "site.key", "infra.tfvars", ".npmrc"]) {
+  for (const name of ["a/.ssh/config", "x/.aws/credentials", "/h/.config/gh/hosts.yml", ".env", ".env.local", "id_ed25519", "deploy.pem", "site.key", "infra.tfvars", ".npmrc", "/h/.codex/auth.json", "auth.json"]) {
     assert.equal(isSensitivePath(name), true, name);
   }
 });

@@ -15,7 +15,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-import { buildCodexArgs, sendsBriefToCodex } from "./lib/codex-args.mjs";
+import { CODEX_API_KEY_VARIABLES, buildCodexArgs, sendsBriefToCodex } from "./lib/codex-args.mjs";
 import { codexUnavailableUntil } from "./lib/codex-availability.mjs";
 import { recordPlanState } from "./lib/codex-events.mjs";
 import { codexPlanIsUsedUp, readCodexLimits } from "./lib/codex-limits.mjs";
@@ -210,7 +210,7 @@ try {
   // win over that login and move the run to paid API billing, so drop such keys.
   // The TypeSafe key is of no use to Codex either, so it does not travel along.
   const env = { ...process.env };
-  for (const name of ["CODEX_API_KEY", "OPENAI_API_KEY", "TYPESAFE_API_KEY", "CLAUDE_PLUGIN_OPTION_TYPESAFE_API_KEY"]) {
+  for (const name of [...CODEX_API_KEY_VARIABLES, "TYPESAFE_API_KEY", "CLAUDE_PLUGIN_OPTION_TYPESAFE_API_KEY"]) {
     delete env[name];
   }
 

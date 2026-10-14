@@ -255,13 +255,62 @@ function realGit() {
   throw new Error("no git on PATH");
 }
 
-// A folder with a git stand-in. "git check-ignore" runs the given shell
-// command; every other git command goes to the real git.
-function ignoreCheckStandIn(t, command) {
+// A folder with a git stand-in. A git call with the given argument runs the
+// given shell command first; every git call that is still running then goes to
+// the real git. The stand-in writes the arguments of every call to argv.log in
+// the same folder.
+function gitStandIn(t, argument, command) {
   const bin = makeTempDir("orch-fake-git-");
   t.after(() => fs.rmSync(bin, { recursive: true, force: true }));
-  fs.writeFileSync(path.join(bin, "git"), `#!/bin/sh\nif [ "$1" = "check-ignore" ]; then ${command}; fi\nexec '${realGit()}' "$@"\n`, { mode: 0o755 });
+  const log = path.join(bin, "argv.log");
+  // The subcommand is no longer the first argument: evidence.mjs puts safety
+  // `-c` config in front of it, so scan all arguments.
+  fs.writeFileSync(path.join(bin, "git"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nfor a in "$@"; do if [ "$a" = '${argument}' ]; then ${command}; break; fi; done\nexec '${realGit()}' "$@"\n`, { mode: 0o755 });
   return bin;
+}
+
+// The git calls that a stand-in saw, one line of arguments each.
+function standInCalls(bin) {
+  const log = path.join(bin, "argv.log");
+  return fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
+}
+
+// "git check-ignore" runs the given shell command; every other git command
+// goes to the real git.
+function ignoreCheckStandIn(t, command) {
+  return gitStandIn(t, "check-ignore", command);
+}
+
+// Runs repoState in a child Node (started through process.execPath) whose PATH
+// starts with the given folder. Returns its result.
+function repoStateWithGitFrom(t, root, bin) {
+  const home = makeTempDir("orch-git-home-");
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const evidence = path.join(ROOT, "scripts", "lib", "evidence.mjs");
+  const script = `import { repoState } from ${JSON.stringify(evidence)}; process.stdout.write(JSON.stringify(repoState(${JSON.stringify(root)})));`;
+  const run = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { PATH: `${bin}${path.delimiter}${process.env.PATH}`, HOME: home }, encoding: "utf8", timeout: 20000 });
+  assert.equal(run.status, 0, run.stderr);
+  return JSON.parse(run.stdout);
+}
+
+// A filter program outside the repository. It leaves a marker file when it
+// runs, then runs the given shell lines.
+function filterProgram(t, body) {
+  const dir = makeTempDir("orch-git-filter-");
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const marker = path.join(dir, "FILTER_RAN");
+  const program = path.join(dir, "filter.sh");
+  fs.writeFileSync(program, `#!/bin/sh\n: > '${marker}'\n${body}\n`, { mode: 0o755 });
+  return { program, marker };
+}
+
+// A change to src/a.mjs that keeps its size: git cannot tell the file changed
+// from its size, so every status hashes it and so starts its filter driver. A
+// size change would let git skip the hash, and a filter test would pass with
+// no guard at all.
+function changeKeepingSize(root) {
+  const file = path.join(root, "src", "a.mjs");
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("line 1\n", "LINE 1\n"));
 }
 
 // Runs findCitations and readExcerpt in a child Node (started through
@@ -353,4 +402,138 @@ test("an unknown repository or commit gives an ineligible group unique to the ag
   const one = changeGroup({ head: null }, "s", "a");
   assert.equal(one.eligible, false);
   assert.notEqual(one.key, changeGroup({ head: null }, "s", "b").key);
+});
+
+test("git calls disable the repository's own fsmonitor, hooks and pager", { skip: process.platform === "win32" }, (t) => {
+  const root = repo(t);
+  // A git stand-in on PATH records the arguments of every git call, then hands
+  // on to the real git, so repoState still works.
+  const bin = makeTempDir("orch-git-spy-");
+  t.after(() => fs.rmSync(bin, { recursive: true, force: true }));
+  const log = path.join(bin, "argv.log");
+  fs.writeFileSync(path.join(bin, "git"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexec '${realGit()}' "$@"\n`, { mode: 0o755 });
+  const home = makeTempDir("orch-git-home-");
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  // A repository that tries to run a program through core.fsmonitor.
+  const marker = path.join(root, "FSMON_RAN");
+  const hook = path.join(bin, "fsmon.sh");
+  fs.writeFileSync(hook, `#!/bin/sh\n: > '${marker}'\nexit 1\n`, { mode: 0o755 });
+  git(["config", "core.fsmonitor", hook], root);
+
+  // Positive control: plain git status runs the planted fsmonitor program.
+  git(["status", "--porcelain"], root);
+  assert.equal(fs.existsSync(marker), true, "the planted fsmonitor must run without the guard, or this test proves nothing");
+  fs.rmSync(marker);
+
+  // The child runs the repoState path (rev-parse, status), worktreeDirty (its
+  // own status) and the excerpt path (which calls git check-ignore), so the spy
+  // logs every git call site, the direct check-ignore one included.
+  const evidence = path.join(ROOT, "scripts", "lib", "evidence.mjs");
+  const script = `import { repoState, findCitations, readExcerpt, worktreeDirty } from ${JSON.stringify(evidence)};`
+    + ` const root = ${JSON.stringify(root)}; const s = repoState(root); const w = worktreeDirty(root);`
+    + ` const [c] = findCitations("src/a.mjs:5", root); readExcerpt(root, c);`
+    + ` process.stdout.write(JSON.stringify({ dirty: s.dirty, worktreeDirty: w }));`;
+  const run = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { PATH: `${bin}${path.delimiter}${process.env.PATH}`, HOME: home }, encoding: "utf8", timeout: 20000 });
+  assert.equal(run.status, 0, run.stderr);
+  // The guard means the repository's fsmonitor program never ran.
+  assert.equal(fs.existsSync(marker), false, "core.fsmonitor must not run under the guard");
+  // Both status calls ran to the end, so the spy saw each of them.
+  assert.deepEqual(JSON.parse(run.stdout), { dirty: false, worktreeDirty: false });
+
+  const lines = fs.readFileSync(log, "utf8").trim().split("\n").filter(Boolean);
+  assert.ok(lines.length > 0, "expected at least one git call");
+  for (const line of lines) {
+    assert.ok(line.includes("-c core.fsmonitor=false"), `missing fsmonitor guard in: ${line}`);
+    assert.ok(line.includes("-c core.hooksPath=/dev/null"), `missing hooks guard in: ${line}`);
+    assert.ok(line.includes("-c core.pager=cat"), `missing pager guard in: ${line}`);
+  }
+  assert.ok(lines.some((line) => /\bstatus\b/.test(line)), "expected a git status call");
+  assert.ok(lines.some((line) => /\bcheck-ignore\b/.test(line)), "expected a git check-ignore call");
+  const statusLines = lines.filter((l) => /\bstatus\b/.test(l));
+  assert.equal(statusLines.length, 2, "expected one git status from repoState and one from worktreeDirty");
+  for (const line of statusLines) {
+    assert.ok(line.includes("--ignore-submodules=all"), `status must not look into submodules: ${line}`);
+  }
+});
+
+test("git status never runs a filter driver that the repository's config names", { skip: process.platform === "win32" }, (t) => {
+  const root = repo(t);
+  const { program, marker } = filterProgram(t, "cat");
+  // The driver name holds a dot, so the guard must take the name up to the
+  // last dot only.
+  git(["config", "filter.x.y.clean", program], root);
+  fs.writeFileSync(path.join(root, ".gitattributes"), "*.mjs filter=x.y\n");
+  changeKeepingSize(root);
+
+  // Positive control: plain git status runs the driver on the changed file.
+  git(["status", "--porcelain"], root);
+  assert.equal(fs.existsSync(marker), true, "the planted filter must run without the guard, or this test proves nothing");
+  fs.rmSync(marker);
+
+  const state = repoState(root);
+  assert.equal(state.error, null);
+  assert.equal(state.dirty, true);
+  assert.equal(fs.existsSync(marker), false, "a filter driver must not run under the guard");
+
+  // A driver name with "=" cannot be blanked with -c, so git does not run at all.
+  git(["config", "filter.a=b.clean", program], root);
+  fs.writeFileSync(path.join(root, ".gitattributes"), "*.mjs filter=a=b\n");
+  git(["status", "--porcelain"], root);
+  assert.equal(fs.existsSync(marker), true, "the planted a=b filter must run without the guard");
+  fs.rmSync(marker);
+  const refused = repoState(root);
+  assert.equal(refused.dirty, null);
+  assert.equal(refused.error, "filter_driver_name");
+  assert.equal(fs.existsSync(marker), false, "a filter named with \"=\" must not run under the guard");
+});
+
+test("git status never runs a filter driver's process command, also when the driver is required", { skip: process.platform === "win32" }, (t) => {
+  const root = repo(t);
+  // A long-running filter program that fails at once. A required driver whose
+  // program fails stops git status, so a guard that blanked only the program
+  // would still break repoState.
+  const { program, marker } = filterProgram(t, "exit 1");
+  git(["config", "filter.p.process", program], root);
+  git(["config", "filter.p.required", "true"], root);
+  fs.writeFileSync(path.join(root, ".gitattributes"), "*.mjs filter=p\n");
+  changeKeepingSize(root);
+
+  // Positive control: plain git status starts the process command, and fails,
+  // because the driver is required.
+  const plain = spawnSync("git", ["status", "--porcelain"], { cwd: root, env: process.env, encoding: "utf8", timeout: 10000 });
+  assert.equal(fs.existsSync(marker), true, "the planted process filter must run without the guard, or this test proves nothing");
+  assert.notEqual(plain.status, 0, "a required driver whose program fails must stop plain git status");
+  fs.rmSync(marker);
+
+  const state = repoState(root);
+  assert.equal(state.error, null);
+  assert.equal(state.dirty, true);
+  assert.equal(fs.existsSync(marker), false, "a process filter must not run under the guard");
+});
+
+test("no other git command runs when the filter driver listing fails", { skip: process.platform === "win32" }, (t) => {
+  const root = repo(t);
+  const { program, marker } = filterProgram(t, "cat");
+  git(["config", "filter.x.clean", program], root);
+  fs.writeFileSync(path.join(root, ".gitattributes"), "*.mjs filter=x\n");
+  changeKeepingSize(root);
+  // Positive control: plain git status runs the planted driver.
+  git(["status", "--porcelain"], root);
+  assert.equal(fs.existsSync(marker), true, "the planted filter must run without the guard, or this test proves nothing");
+  fs.rmSync(marker);
+  // Positive control: a stand-in that fails no call hands every call on, and
+  // repoState works through it.
+  const passed = repoStateWithGitFrom(t, root, gitStandIn(t, "--no-such-argument", "exit 128"));
+  assert.equal(passed.error, null);
+  assert.equal(passed.dirty, true);
+
+  const bin = gitStandIn(t, "--get-regexp", "exit 128");
+  const failed = repoStateWithGitFrom(t, root, bin);
+  assert.equal(failed.error, "failed");
+  assert.equal(failed.dirty, null);
+  assert.equal(fs.existsSync(marker), false, "the filter must not run when the listing fails");
+  // The listing was the only git call: nothing ran after it failed.
+  const calls = standInCalls(bin);
+  assert.equal(calls.length, 1, calls.join("\n"));
+  assert.match(calls[0], / config --name-only --get-regexp /);
 });

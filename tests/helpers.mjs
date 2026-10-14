@@ -16,6 +16,9 @@ export function makeTempDir(prefix = "orch-test-") {
 export function cleanEnv(tempDir, extra = {}) {
   return {
     PATH: process.env.PATH,
+    // The parent's temp folder, so a child finds the fixtures that makeTempDir
+    // made there. Without it a child on macOS falls back to /tmp.
+    TMPDIR: os.tmpdir(),
     HOME: tempDir,
     ORCH_DATA_DIR: path.join(tempDir, "data"),
     // Hide host instruction files when the runner walks ancestors. This test

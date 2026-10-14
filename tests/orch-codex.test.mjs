@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { buildCodexArgs, CONSULT_CONTRACT, parseOptions, REVIEW_CONTRACT, UsageError } from "../scripts/lib/codex-args.mjs";
+import { buildCodexArgs, CONSULT_CONTRACT, parseOptions, REVIEW_CONTRACT, stripCodexApiKeys, UsageError } from "../scripts/lib/codex-args.mjs";
 import { codexUnavailableUntil, markCodexUnavailable } from "../scripts/lib/codex-availability.mjs";
 import { earlierLongMessages } from "../scripts/lib/codex-events.mjs";
 import { readCodexLimits, readLimitsOfThread, saveCodexLimits } from "../scripts/lib/codex-limits.mjs";
 import { parseDirectives, writeRequest } from "../scripts/lib/codex-request.mjs";
+import { systemTempFolder } from "../scripts/lib/open-no-links.mjs";
+import { workerEntries } from "../scripts/lib/protected-copy.mjs";
 import { describeTime } from "../scripts/lib/provider-state.mjs";
 import { acquireWriterLock, jobsDir, writerLockPath } from "../scripts/lib/writer-lock.mjs";
-import { cleanEnv, makeTempDir, runNode } from "./helpers.mjs";
+import { cleanEnv, makeTempDir, ROOT, runNode } from "./helpers.mjs";
 
 const CLI = "scripts/orch-codex.mjs";
 
@@ -117,7 +120,7 @@ test("implement sends the brief with the result contract and returns the answer"
   await withSetup({}, async ({ tempDir, env }) => {
     const brief = "Goal: fix `x`. Use $(nothing) and 'quotes'.\nORCH_BRIEF_END\necho must-not-run";
     const result = await runNode(CLI, { args: ["implement", "--wait", "20"], stdin: brief, env, cwd: tempDir });
-    assert.equal(result.code, 0);
+    assert.equal(result.code, 0, result.stdout);
     assert.match(result.stdout, /^CODEX_JOB \d{8}-\d{6}-[0-9a-f]{6} exit=0 input_tokens=10 output_tokens=2\n/);
     assert.ok(result.stdout.includes(brief), "the task text must arrive unchanged");
     assert.ok(result.stdout.includes("Changed files:"), "the result contract is added to the brief");
@@ -125,11 +128,37 @@ test("implement sends the brief with the result contract and returns the answer"
   });
 });
 
+// A slow runner can start the command before the caller has written stdin.
+// Reading process.stdin.isTTY used to make fd 0 non-blocking, so that early read
+// failed with EAGAIN and the text came out empty ("needs a brief", exit 2).
+test("a task text that arrives on stdin after the start is still read", async () => {
+  await withSetup({}, async ({ tempDir, env }) => {
+    const child = spawn(process.execPath, [path.join(ROOT, CLI), "implement", "--wait", "20"], { env, cwd: tempDir, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    const code = new Promise((resolve) => child.on("close", resolve));
+    setTimeout(() => child.stdin.end("Goal: a late brief"), 300);
+    assert.equal(await code, 0, stdout);
+    assert.ok(stdout.includes("Goal: a late brief"), stdout);
+  });
+});
+
 test("API keys in the environment never reach Codex", async () => {
   await withSetup({ CODEX_API_KEY: "fake-codex-key", OPENAI_API_KEY: "fake-openai-key" }, async ({ tempDir, env }) => {
     const result = await runNode(CLI, { args: ["implement", "--wait", "20"], stdin: "Goal: x", env, cwd: tempDir });
     assert.ok(result.stdout.includes("KEYS=[]"), result.stdout);
+    // The command line itself drops the keys, so the runner never sees them
+    // either, and the caller needs no `env -u` in front of the command.
+    assert.match(result.stderr, /CODEX_API_KEY and OPENAI_API_KEY removed from the environment/);
+    assert.ok(!result.stderr.includes("fake-"), "a key value is never printed");
   });
+});
+
+test("stripCodexApiKeys removes only the two API keys and names them", () => {
+  const env = { OPENAI_API_KEY: "x", CODEX_API_KEY: "y", OTHER: "z", ORCH_CODEX_BIN: "codex" };
+  assert.deepEqual(stripCodexApiKeys(env), ["CODEX_API_KEY", "OPENAI_API_KEY"]);
+  assert.deepEqual(env, { OTHER: "z", ORCH_CODEX_BIN: "codex" });
+  assert.deepEqual(stripCodexApiKeys(env), []);
 });
 
 test("a Codex login that is not ChatGPT stops the job before it starts", async () => {
@@ -289,6 +318,10 @@ test("a long job reports STILL_RUNNING, and wait returns the result later", asyn
     const id = jobIdOf(first.stdout);
     assert.ok(first.stdout.startsWith(`STILL_RUNNING ${id} minutes=0\n`), first.stdout);
     assert.ok(first.stdout.includes(`wait ${id}`));
+    // The printed command must match the exclusion entry that the setup check
+    // and the claim message name, or a worker in the sandbox gets stuck there.
+    const waitLine = first.stdout.split("\n").find((line) => line.startsWith("node "));
+    assert.equal(waitLine?.replace(id, "*"), workerEntries(ROOT).find((entry) => entry.endsWith(" wait *")), first.stdout);
 
     const second = await runNode(CLI, { args: ["wait", id, "--wait", "20"], env, cwd: tempDir });
     assert.equal(second.code, 0);
@@ -479,6 +512,198 @@ test("consult sends the question with its own contract to a read-only Codex", as
   });
 });
 
+test("the task text can come from a file with --brief, with nothing on stdin", async () => {
+  await withSetup({}, async ({ tempDir, env }) => {
+    const briefFile = path.join(tempDir, "brief.md");
+    fs.writeFileSync(briefFile, "Which store fits here?\n");
+    const consult = await runNode(CLI, { args: ["consult", "--brief", briefFile, "--wait", "20"], stdin: "", env, cwd: tempDir });
+    assert.equal(consult.code, 0, consult.stdout);
+    assert.match(consult.stdout, /^CODEX_JOB \S+ exit=0 kind=consult /);
+    assert.ok(consult.stdout.includes(`STDIN=Which store fits here?\n${CONSULT_CONTRACT}`), consult.stdout);
+
+    // A relative path is read from the working folder.
+    const implement = await runNode(CLI, { args: ["implement", "--brief", "brief.md", "--wait", "20"], stdin: "", env, cwd: tempDir });
+    assert.equal(implement.code, 0, implement.stdout);
+    assert.ok(implement.stdout.includes("STDIN=Which store fits here?\n"), implement.stdout);
+    assert.ok(implement.stdout.includes("Changed files:"), "an implement brief gets the result contract");
+
+    const review = await runNode(CLI, { args: ["review", "--custom", "--brief", "brief.md", "--wait", "20"], stdin: "", env, cwd: tempDir });
+    assert.equal(review.code, 0, review.stdout);
+    assert.ok(review.stdout.includes("STDIN=Which store fits here?\n"), review.stdout);
+    assert.ok(review.stdout.includes("[P0]"), "a custom review keeps its review format");
+
+    // The option can stand before the scope flag too.
+    const first = await runNode(CLI, { args: ["review", "--brief", "brief.md", "--custom", "--wait", "20"], stdin: "", env, cwd: tempDir });
+    assert.equal(first.code, 0, first.stdout);
+  });
+});
+
+test("--brief refuses a text on stdin, a bad file and the commands that take no text", async () => {
+  await withSetup({}, async ({ tempDir, env }) => {
+    const briefFile = path.join(tempDir, "brief.md");
+    fs.writeFileSync(briefFile, "Question\n");
+
+    const both = await runNode(CLI, { args: ["consult", "--brief", briefFile], stdin: "Another question", env, cwd: tempDir });
+    assert.equal(both.code, 2, both.stdout);
+    assert.match(both.stdout, /--brief and stdin both carry a task text/);
+
+    const missing = await runNode(CLI, { args: ["consult", "--brief", path.join(tempDir, "nope.md")], stdin: "", env, cwd: tempDir });
+    assert.equal(missing.code, 2, missing.stdout);
+    assert.match(missing.stdout, /cannot be read/);
+
+    const folder = await runNode(CLI, { args: ["consult", "--brief", tempDir], stdin: "", env, cwd: tempDir });
+    assert.equal(folder.code, 2, folder.stdout);
+    assert.match(folder.stdout, /not a regular file/);
+
+    fs.writeFileSync(path.join(tempDir, "empty.md"), "  \n");
+    const empty = await runNode(CLI, { args: ["consult", "--brief", "empty.md"], stdin: "", env, cwd: tempDir });
+    assert.equal(empty.code, 2, empty.stdout);
+    assert.match(empty.stdout, /consult needs the question/);
+
+    const scoped = await runNode(CLI, { args: ["review", "--base", "main", "--brief", briefFile], stdin: "", env, cwd: tempDir });
+    assert.equal(scoped.code, 2, scoped.stdout);
+    assert.match(scoped.stdout, /review reads a brief only with --custom/);
+
+    const plain = await runNode(CLI, { args: ["review", "--brief", briefFile], stdin: "", env, cwd: tempDir });
+    assert.equal(plain.code, 2, plain.stdout);
+    assert.match(plain.stdout, /review reads a brief only with --custom/);
+
+    const waiting = await runNode(CLI, { args: ["wait", "20260101-000000-abcdef", "--brief", briefFile], stdin: "", env, cwd: tempDir });
+    assert.equal(waiting.code, 2, waiting.stdout);
+    assert.match(waiting.stdout, /--brief applies to implement, review and consult only/);
+
+    assert.throws(() => parseOptions(["--brief"]), UsageError);
+    assert.throws(() => parseOptions(["--brief", ""]), UsageError);
+    assert.equal(parseOptions(["--brief", "x.md"]).briefFile, "x.md");
+  });
+});
+
+test("--brief reads a file under the temp folder only, and never a hard link", async () => {
+  await withSetup({}, async ({ tempDir, env }) => {
+    // The temporary folder of the test is under the temp folder, so a file that
+    // lies elsewhere comes from this repository. When the repository itself is
+    // under the temp folder, that part of the test proves nothing and is skipped.
+    const outside = path.join(ROOT, "package.json");
+    if (!fs.realpathSync(ROOT).startsWith(`${fs.realpathSync(os.tmpdir())}${path.sep}`)) {
+      const refused = await runNode(CLI, { args: ["consult", "--brief", outside], stdin: "", env, cwd: tempDir });
+      assert.equal(refused.code, 2, refused.stdout);
+      assert.match(refused.stdout, /lies outside the temp folder/);
+
+      // A symbolic link inside the temp folder to a file elsewhere is refused too.
+      fs.symlinkSync(outside, path.join(tempDir, "link.md"));
+      const linked = await runNode(CLI, { args: ["consult", "--brief", "link.md"], stdin: "", env, cwd: tempDir });
+      assert.equal(linked.code, 2, linked.stdout);
+      assert.match(linked.stdout, /lies outside the temp folder/);
+    }
+
+    fs.writeFileSync(path.join(tempDir, "brief.md"), "Question\n");
+    fs.linkSync(path.join(tempDir, "brief.md"), path.join(tempDir, "hard.md"));
+    const hard = await runNode(CLI, { args: ["consult", "--brief", "hard.md"], stdin: "", env, cwd: tempDir });
+    assert.equal(hard.code, 2, hard.stdout);
+    assert.match(hard.stdout, /more than one hard link/);
+  });
+});
+
+// True when a folder's real path is a system temp folder that the brief rule
+// accepts.
+function inSystemTemp(folder) {
+  return systemTempFolder(fs.realpathSync(folder));
+}
+
+test("--brief takes no file through the working folder or through a TMPDIR outside the system temp folders", { skip: process.platform === "win32" }, async (t) => {
+  // The repository is the one folder outside the system temp folders that a
+  // test run can always write. When it lies in one, the refusals prove nothing.
+  if (inSystemTemp(ROOT)) {
+    t.skip("the repository lies in a system temp folder, so no brief can lie outside one");
+    return;
+  }
+  const root = fs.mkdtempSync(path.join(ROOT, ".orch-brief-test-"));
+  const temp = makeTempDir();
+  try {
+    const bin = path.join(root, "fake-codex.cjs");
+    fs.writeFileSync(bin, FAKE_CODEX, { mode: 0o755 });
+    const env = cleanEnv(root, { ORCH_CODEX_BIN: bin });
+    const work = path.join(root, "work");
+    fs.mkdirSync(work);
+    const local = path.join(work, "brief.md");
+    fs.writeFileSync(local, "Which queue fits here?\n");
+
+    // The working folder holds the brief: refused, also when TMPDIR names the
+    // same folder, because that folder is not a system temp folder.
+    const viaCwd = await runNode(CLI, { args: ["consult", "--brief", "brief.md", "--wait", "20"], stdin: "", env, cwd: work });
+    assert.equal(viaCwd.code, 2, viaCwd.stdout);
+    assert.match(viaCwd.stdout, /lies outside the temp folder/);
+    const viaTmpdir = await runNode(CLI, { args: ["consult", "--brief", local, "--wait", "20"], stdin: "", env: { ...env, TMPDIR: work }, cwd: work });
+    assert.equal(viaTmpdir.code, 2, viaTmpdir.stdout);
+    assert.match(viaTmpdir.stdout, /lies outside the temp folder/);
+
+    // Positive control: the same text in the real temp folder is read. The run
+    // reads only inside its fixture root, so this one is rooted in the temp folder.
+    assert.ok(inSystemTemp(temp), `the test's temp folder ${temp} lies in a system temp folder`);
+    const tempBin = path.join(temp, "fake-codex.cjs");
+    fs.writeFileSync(tempBin, FAKE_CODEX, { mode: 0o755 });
+    const tempWork = path.join(temp, "work");
+    fs.mkdirSync(tempWork);
+    const inTemp = path.join(temp, "brief.md");
+    fs.writeFileSync(inTemp, "Which queue fits here?\n");
+    const admitted = await runNode(CLI, { args: ["consult", "--brief", inTemp, "--wait", "20"], stdin: "", env: cleanEnv(temp, { ORCH_CODEX_BIN: tempBin }), cwd: tempWork });
+    assert.equal(admitted.code, 0, admitted.stdout);
+    assert.ok(admitted.stdout.includes("STDIN=Which queue fits here?\n"), admitted.stdout);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("--brief never sends a credential file or a brief that holds a private key", async () => {
+  await withSetup({}, async ({ tempDir, env }) => {
+    // A conventional credential name is refused by its name, before any read.
+    for (const name of [".env", "server.pem", "id_rsa"]) {
+      fs.writeFileSync(path.join(tempDir, name), "SECRET=value\n");
+      const refused = await runNode(CLI, { args: ["consult", "--brief", name], stdin: "", env, cwd: tempDir });
+      assert.equal(refused.code, 2, refused.stdout);
+      assert.match(refused.stdout, /credential file/);
+    }
+
+    // A symbolic link with an innocent name to a credential file is refused by
+    // its real path.
+    fs.symlinkSync(path.join(tempDir, ".env"), path.join(tempDir, "ok.md"));
+    const linked = await runNode(CLI, { args: ["consult", "--brief", "ok.md"], stdin: "", env, cwd: tempDir });
+    assert.equal(linked.code, 2, linked.stdout);
+    assert.match(linked.stdout, /resolves to a credential file/);
+
+    // A brief whose content holds a private key, whatever its name, is refused.
+    fs.writeFileSync(path.join(tempDir, "task.md"), "Goal: ship it\n-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n");
+    const key = await runNode(CLI, { args: ["consult", "--brief", "task.md"], stdin: "", env, cwd: tempDir });
+    assert.equal(key.code, 2, key.stdout);
+    assert.match(key.stdout, /private key/);
+  });
+});
+
+test("--brief follows a link to an allowed file but rejects a FIFO without hanging", async () => {
+  await withSetup({}, async ({ tempDir, env }) => {
+    // A symbolic link to a regular file under an allowed folder is read through
+    // its real path, so it works. O_NOFOLLOW on the resolved path does not block
+    // this, because the resolved path is the regular file, not the link.
+    fs.writeFileSync(path.join(tempDir, "real.md"), "Which store fits here?\n");
+    fs.symlinkSync(path.join(tempDir, "real.md"), path.join(tempDir, "via-link.md"));
+    const linked = await runNode(CLI, { args: ["consult", "--brief", "via-link.md", "--wait", "20"], stdin: "", env, cwd: tempDir });
+    assert.equal(linked.code, 0, linked.stdout);
+    assert.ok(linked.stdout.includes("STDIN=Which store fits here?\n"), linked.stdout);
+
+    // A named pipe with no writer must be rejected at once, not block the open.
+    const fifo = path.join(tempDir, "pipe.md");
+    const made = spawnSync("mkfifo", [fifo]);
+    if (made.status === 0) {
+      const started = Date.now();
+      const refused = await runNode(CLI, { args: ["consult", "--brief", "pipe.md", "--wait", "20"], stdin: "", env, cwd: tempDir });
+      assert.ok(Date.now() - started < 10000, "a FIFO brief must not hang the open");
+      assert.equal(refused.code, 2, refused.stdout);
+      assert.match(refused.stdout, /not a regular file/);
+    }
+  });
+});
+
 // A stand-in that behaves like codex-cli 0.154.0. `exec review` runs the review
 // in a second thread that must end with a JSON verdict. Only the verdict reaches
 // the result file and the JSON events; the long answer stays in the second
@@ -641,6 +866,9 @@ test("when only the runner dies, the job stays active because Codex still writes
     assert.ok(waited.stdout.startsWith(`STILL_RUNNING ${id}`), waited.stdout);
     assert.ok(waited.stdout.includes("Codex itself is still alive"));
     assert.ok(waited.stdout.includes(`cancel ${id}`));
+    // The printed cancel command must match its exclusion entry too.
+    const cancelLine = waited.stdout.split("\n").find((line) => line.startsWith("node "));
+    assert.equal(cancelLine?.replace(id, "*"), workerEntries(ROOT).find((entry) => entry.endsWith(" cancel *")), waited.stdout);
 
     const second = await runNode(CLI, { args: ["implement", "--wait", "0.5"], stdin: "Goal: second", env, cwd: tempDir });
     assert.ok(second.stdout.includes(`writer_busy: the Codex job ${id}`), "the folder stays locked while Codex lives");
@@ -669,6 +897,33 @@ test("a stored request with a wrong line or a missing folder starts nothing", as
     assert.equal(second.code, 2);
     assert.match(second.stdout, /folder of the task does not exist/);
     assert.ok(!fs.existsSync(path.join(tempDir, "data", "codex-jobs")), "no Codex job was started");
+  });
+});
+
+// Inside the Claude sandbox the claim rename fails with EPERM. A folder that the
+// process cannot write gives EACCES on the same rename, so it stands in here.
+test("a request that cannot be claimed starts nothing, stays unchanged and says why", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  await withSetup({}, async ({ tempDir, env }) => {
+    const dataEnv = { ORCH_DATA_DIR: env.ORCH_DATA_DIR };
+    const { id } = writeRequest({ kind: "review", prompt: "Goal: review", cwd: tempDir }, dataEnv);
+    const requests = path.join(env.ORCH_DATA_DIR, "codex-requests");
+    const stored = fs.readFileSync(path.join(requests, `${id}.json`), "utf8");
+    fs.chmodSync(requests, 0o555);
+    try {
+      const result = await runNode(CLI, { args: ["run", id], env, cwd: tempDir });
+      assert.equal(result.code, 2);
+      assert.match(result.stdout, new RegExp(`^CODEX_FAILED usage error: the request ${id} could not be claimed \\(EACCES\\), so no Codex job started and the request is unchanged\\.`));
+      // This test runs from a working checkout, so no entry to paste is offered.
+      assert.match(result.stdout, /must not leave the sandbox/);
+      assert.ok(!result.stdout.includes("orch-codex.mjs\" run *"));
+      assert.equal(fs.readFileSync(path.join(requests, `${id}.json`), "utf8"), stored, "the request file is unchanged");
+      assert.ok(!fs.existsSync(path.join(env.ORCH_DATA_DIR, "codex-jobs")) || fs.readdirSync(path.join(env.ORCH_DATA_DIR, "codex-jobs")).length === 0, "no Codex job was started");
+    } finally {
+      fs.chmodSync(requests, 0o700);
+    }
+    // After the fix, the same run claims the request.
+    const again = await runNode(CLI, { args: ["run", id, "--wait", "20"], env, cwd: tempDir });
+    assert.match(again.stdout, /^CODEX_JOB /);
   });
 });
 

@@ -1178,6 +1178,28 @@ test("the status line snippet writes the reset times and the session id as JSON,
   }
 });
 
+test("without a status line log, the setup check calls it missing only while Jev is on", async () => {
+  const tempDir = makeTempDir();
+  try {
+    const file = path.join(tempDir, "limits-latest.json");
+    // The limit rules act only through the routing, so without Jev no log is needed.
+    const off = await runNode("scripts/setup-check.mjs", { env: cleanEnv(tempDir, { ORCH_LIMITS_FILE: file, ORCH_CODEX_ENABLED: "", ORCH_JEV_ENABLED: "" }) });
+    assert.equal(off.code, 0, off.stderr);
+    assert.match(off.stdout, /^OK\s+Status line log: not needed while Jev is off/m);
+    const on = await runNode("scripts/setup-check.mjs", { env: cleanEnv(tempDir, { ORCH_LIMITS_FILE: file, ORCH_CODEX_ENABLED: "" }) });
+    assert.match(on.stdout, /^MISSING\s+Status line log: .*does not exist/m);
+    // An old or a damaged log gives no warning either while Jev is off.
+    const jevOff = cleanEnv(tempDir, { ORCH_LIMITS_FILE: file, ORCH_CODEX_ENABLED: "", ORCH_JEV_ENABLED: "" });
+    for (const text of ["not json", JSON.stringify({ ts: Math.floor(Date.now() / 1000) - 3600, five_hour: 12, seven_day: 34 })]) {
+      fs.writeFileSync(file, text);
+      const run = await runNode("scripts/setup-check.mjs", { env: jevOff });
+      assert.match(run.stdout, /^OK\s+Status line log: not needed while Jev is off/m, text);
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("the setup check reports a status line log without reset times, and names the reset times when they are there", async () => {
   const tempDir = makeTempDir();
   try {

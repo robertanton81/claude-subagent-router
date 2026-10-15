@@ -44,6 +44,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/orch-config.mjs" unset limitGate
 
 To explain a setting without changing it, use `explain <key>`, or `explain` for the whole list.
 
+With Claude Code's Bash sandbox on, `set` and `unset` fail with `EPERM` (operation not permitted), because the sandbox denies writes to `~/.claude/orchestrator`. Then retry the same command outside the sandbox, which may ask the user, or give the user the exact command to run in a terminal. Never edit `config.json` another way.
+
 ## Finish
 
 1. Tell the user that the hooks use the new settings from the next subagent call, and that an open session keeps the start text it was given (the mode and which workers are on) until it starts, resumes or compacts again.

@@ -173,8 +173,37 @@ export function workerCoverage(root, excludedCommands) {
 export function broadEntries(root, excludedCommands) {
   const listed = Array.isArray(excludedCommands) ? excludedCommands.filter((entry) => typeof entry === "string") : [];
   const script = path.join(root, "scripts", "orch-codex.mjs");
-  const calls = ["implement --brief brief.md", "review --custom --brief brief.md", "consult --brief brief.md"].map((rest) => `node "${script}" ${rest}`);
+  // A person writes these calls by hand, with or without quotes around the
+  // script path, so both forms count.
+  const calls = ["implement --brief brief.md", "review --custom --brief brief.md", "consult --brief brief.md"].flatMap((rest) => [`node "${script}" ${rest}`, `node ${script} ${rest}`]);
   return listed.filter((entry) => calls.some((call) => entryMatches(entry, call)));
+}
+
+// The drop-in files of a managed-settings.d folder, in the order Claude Code
+// merges them: names in alphabetical order, only files or symbolic links that
+// end in .json, and never a name that starts with a dot (a hidden backup).
+export function managedDropIns(dir, readdir = (folder) => fs.readdirSync(folder, { withFileTypes: true })) {
+  try {
+    return readdir(dir)
+      .filter((entry) => !entry.name.startsWith(".") && entry.name.endsWith(".json") && (entry.isFile() || entry.isSymbolicLink()))
+      .map((entry) => entry.name)
+      .sort()
+      .map((name) => path.join(dir, name));
+  } catch {
+    // A missing folder is the normal case. A folder that this user cannot
+    // list, Claude Code, which runs as the same user, cannot list either.
+    return [];
+  }
+}
+
+// Whether the Claude Bash sandbox is on, from the sandbox.enabled values of the
+// settings files (undefined where a file sets none). `managed` is in merge
+// order, the base file first and then the drop-ins, and a later value replaces
+// an earlier one. Then managed settings win over the project's local file, that
+// over its shared file, and that over the user's file. Off by default.
+export function effectiveSandboxEnabled({ managed = [], projectLocal, projectShared, user }) {
+  const managedValue = [...managed].reverse().find((value) => value !== undefined);
+  return [managedValue, projectLocal, projectShared, user].find((value) => value !== undefined) ?? false;
 }
 
 // Entries that hold the unexpanded variable: they match no worker call.
@@ -187,8 +216,11 @@ export function deadVariableEntries(excludedCommands) {
 // copyProtection, `coverage` from workerCoverage and `dead` from
 // deadVariableEntries and `broad` from broadEntries. `unreadable` lists the
 // settings files that exist but could not be used, as { file, json: true } for
-// text that is not valid JSON, or { file, code } for a read error.
-export function sandboxRows({ root, kind, problem, coverage, dead = [], broad = [], unreadable = [] }) {
+// text that is not valid JSON, or { file, code } for a read error. `sandboxOn`
+// is false when no settings file that the check reads turns the Claude Bash
+// sandbox on; then the row says that no entry is needed, and for a protected
+// copy it still names the missing ones (a --settings file is not seen).
+export function sandboxRows({ root, kind, problem, coverage, dead = [], broad = [], unreadable = [], sandboxOn = true }) {
   const rows = [];
   for (const { file, json, code } of unreadable) {
     const how = json ? "as JSON" : `(${code})`;
@@ -202,11 +234,17 @@ export function sandboxRows({ root, kind, problem, coverage, dead = [], broad = 
     rows.push(["WARN", `these entries also let implement, review or consult leave the sandbox: ${broad.join(" ; ")}. Those commands send a text and a file that the session chooses, so keep only the entries for run, wait and cancel`]);
   }
   // Entries are patterns, so a broad one (node "<copy>/scripts/orch-codex.mjs" *)
-  // covers the worker calls too.
-  const covering = [...new Set(coverage.flatMap((item) => item.coveredBy))];
+  // covers the worker calls too. On a copy that a session can change, an entry
+  // for implement, review or consult is just as unsafe.
+  const covering = [...new Set([...coverage.flatMap((item) => item.coveredBy), ...(kind ? [] : broad)])];
   const missing = coverage.filter((item) => item.coveredBy.length === 0).map((item) => item.entry);
+  // An unsafe entry warns even while the sandbox is off: it acts the moment the
+  // sandbox goes on.
   if (!kind && covering.length > 0) {
     rows.push(["WARN", `these exclusion entries cover this copy (${root}): ${covering.join(" ; ")}. But ${problem}. Remove them: a session could change code that then runs with full access`]);
+  } else if (!sandboxOn) {
+    const then = kind && missing.length > 0 ? `add these sandbox.excludedCommands entries: ${missing.join(" ; ")}` : "see guide/codex.md, section \"The Claude sandbox\"";
+    rows.push(["OK", `no settings file that this check reads (user, project, managed) turns the Claude Bash sandbox on, so Codex workers need no sandbox exclusion. If the sandbox is on for you anyway, for example through a --settings file, ${then}`]);
   } else if (!kind) {
     rows.push(["OK", `this copy (${root}) gets no sandbox exclusion, because ${problem}. In a session with the Claude sandbox on, Codex workers stop and say so. guide/codex.md, section "The Claude sandbox", names the copies that can be excluded`]);
   } else if (missing.length > 0) {

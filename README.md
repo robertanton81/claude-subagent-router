@@ -11,9 +11,9 @@ See [What leaves your machine](#what-leaves-your-machine) before you turn either
 
 ## Why
 
-Your Claude plan counts usage in two windows, periods that start again when they reset: a 5-hour window and a weekly window. Without routing, a subagent often runs on the same large model as the main session, even for a simple file search. That uses up both windows faster than needed. With routing on, the plugin picks Haiku for a search, Sonnet for most edits and reviews, and Opus for hard work. With Codex on, a hard implementation can go to Codex when its brief is self-contained: the brief holds everything that the task needs. So your ChatGPT plan takes part of the work.
+Your Claude plan counts usage in two windows, periods that start again when they reset: a 5-hour window and a weekly window. Without routing, a subagent often runs on the same large model as the main session, even for a simple file search. That uses up both windows faster than needed. With routing on, the plugin picks Haiku for a search, Sonnet for most edits and reviews, and Opus for hard work. With Jev and Codex on, a hard implementation can go to Codex when its brief is self-contained: the brief holds everything that the task needs. So your ChatGPT plan takes part of the work.
 
-The plugin calls no Claude or OpenAI API, so the work stays inside your plans. The one paid API is Jev, at about $0.00005 per call. Whether the routing saves money on your work is not proven yet; the [offline evaluation](EVALUATION.md) measures it.
+The plugin calls no Claude or OpenAI API, so the work stays inside your plans; the one paid API is Jev. Whether the routing saves money on your work is not proven yet; the [offline evaluation](EVALUATION.md) measures it.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ The plugin calls no Claude or OpenAI API, so the work stays inside your plans. T
 
 ## Install
 
-This repository is also a marketplace: a catalog of plugins that Claude Code can install from. Add it once, then install the plugin for one project:
+This repository is also a marketplace, a catalog of plugins. Add it, then install the plugin for one project:
 
 ```bash
 claude plugin marketplace add robertanton81/claude-subagent-router
@@ -34,22 +34,22 @@ claude plugin marketplace add robertanton81/claude-subagent-router
 cd /path/to/your-project && claude plugin install subagent-router@claude-subagent-router --scope local
 ```
 
-- `--scope local` turns the plugin on only in that project, in `.claude/settings.local.json`, which Git does not track. Leave it out to turn the plugin on in every project. The settings file is one file per user either way.
+- `--scope local` turns the plugin on only in that project, in `.claude/settings.local.json`, which Git does not track. Leave it out to turn the plugin on in every project. The plugin's settings file, `~/.claude/orchestrator/config.json`, is one per user either way.
 - If you already have a TypeSafe key, the command in [Turn on Jev](guide/setup.md#turn-on-jev) installs the plugin and stores the key in one step.
-- `claude plugin marketplace update claude-subagent-router` fetches a new version.
+- To update, run `claude plugin marketplace update claude-subagent-router`, then `claude plugin update subagent-router@claude-subagent-router`, and start a new session.
 
 ## Setup
 
 In a session, the skills `/subagent-router:configure` and `/subagent-router:setup` do this work. Each step below has full instructions in [Setup](guide/setup.md).
 
-1. **Turn on Jev**, for the routing. Create a key at https://console.typesafe.ai/keys, store it in the plugin option (a setting that Claude Code keeps for the plugin), then turn Jev on with `/subagent-router:configure`. [Turn on Jev](guide/setup.md#turn-on-jev) has a command that keeps the key out of your shell history.
-2. **Turn on Codex** (optional). Run `codex login` with your ChatGPT account, then turn Codex on with `/subagent-router:configure`.
-3. **Add the status line log** (optional). The limit rules, which move work when Claude is near its limit, need your Claude usage numbers. Only your status line script receives them: it prints the line at the bottom of Claude Code. See [Add the status line log](guide/setup.md#add-the-status-line-log-optional).
+1. **Turn on Jev** (optional), for the routing. Create a key at https://console.typesafe.ai/keys, store it in the plugin option (a setting that Claude Code keeps for the plugin), then turn Jev on with `/subagent-router:configure`. See [Turn on Jev](guide/setup.md#turn-on-jev).
+2. **Turn on Codex** (optional). Run `codex login` with your ChatGPT account, then turn Codex on with `/subagent-router:configure`. With Claude Code's Bash sandbox on (its limit on what shell commands may write), see [The Claude sandbox](guide/codex.md#the-claude-sandbox).
+3. **Add the status line log** (optional, with Jev on). The limit rules, which move work when Claude is near its limit, need your Claude usage numbers, which only your status line script receives. See [Add the status line log](guide/setup.md#add-the-status-line-log-optional).
 4. **Check the setup** with `/subagent-router:setup`. The check never prints a secret.
 
 ## What leaves your machine
 
-- **To TypeSafe, only while Jev is on:** the description and the whole brief of each routed subagent call, and the `Verification:` part of a finished worker's answer. Only when you turn on the finding triage, an experimental check of review findings, for a listed checkout: review findings with excerpts of the cited code.
+- **To TypeSafe, only while Jev is on:** the description and the whole brief of each routed subagent call, and the `Verification:` part of a finished worker's answer. With the experimental check of review findings (the finding triage) on for a listed checkout: review findings with excerpts of the cited code.
 - **To OpenAI, only while Codex is on:** the brief of each Codex implement task, custom review and consult, with your Claude instruction files, and anything that Codex reads while it works. Its sandbox, the limits that Codex puts on its own commands, restricts where Codex writes, not what it reads.
 - **Nothing else.** The log, the Codex jobs and the settings stay in `~/.claude/orchestrator/`, readable only by your user.
 
@@ -72,9 +72,9 @@ The full list, with what is masked and how to send less, is in [What leaves your
 | `subagent-router:debugger` | Opus | Finds the cause of a failure. |
 | `subagent-router:reviewer` | Sonnet | Reviews changes. Changes no files. |
 | `subagent-router:codex-implementer` | Codex CLI, started by a small Haiku agent | Implements a task on the ChatGPT plan. Needs a self-contained brief. |
-| `subagent-router:codex-reviewer` | Codex CLI, started by a small Haiku agent | Reviews the uncommitted changes, a branch or a commit. |
+| `subagent-router:codex-reviewer` | Codex CLI, started by a small Haiku agent | Reviews the uncommitted changes, a branch, a commit, or by the brief's own instructions. |
 
-Each worker sets its model and its effort (how much the model thinks before it answers) in its agent file; see [How the routing works](guide/routing.md).
+Each worker's agent file sets its model, and for Sonnet and Opus the effort (how much the model thinks before answering); see [How the routing works](guide/routing.md).
 
 ## TypeSafe and Jev
 
@@ -88,7 +88,7 @@ More in [TypeSafe and Jev](guide/jev.md).
 
 ## Use
 
-After the setup, work as usual.
+After the setup, work as usual. To see a worker run, ask for "Use a subagent to list the files that import `fs`", then run `/subagent-router:report`.
 
 | Skill | What it does |
 | :-- | :-- |
@@ -107,6 +107,7 @@ All settings live in one optional file, `~/.claude/orchestrator/config.json`. Ch
 - **The routing table and its gates, the confidence levels at which a rule acts, are first guesses.** Whether the routing saves money on real work is not established; see [EVALUATION.md](EVALUATION.md).
 - **The writer lock has gaps.** It does not cover edits by the main session or calls to other agent types.
 - **A Codex job can spend credits although `codexSpendCredits` is `false`,** when the saved plan numbers are old.
+- **Codex workers stop inside the Bash sandbox** without exclusion entries; see [The Claude sandbox](guide/codex.md#the-claude-sandbox).
 
 Every limit, with details, is in [Known limits](guide/known-limits.md).
 

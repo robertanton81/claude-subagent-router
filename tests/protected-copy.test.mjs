@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { broadEntries, claimRefusedMessage, copyProtection, deadVariableEntries, entryMatches, isPermissionError, sandboxRows, workerCoverage, workerEntries } from "../scripts/lib/protected-copy.mjs";
+import { broadEntries, claimRefusedMessage, copyProtection, effectiveSandboxEnabled, managedDropIns, deadVariableEntries, entryMatches, isPermissionError, sandboxRows, workerCoverage, workerEntries } from "../scripts/lib/protected-copy.mjs";
 import { ROOT } from "./helpers.mjs";
 
 const COPY = "/opt/release/subagent-router";
@@ -247,6 +247,48 @@ test("broadEntries finds the entries that also cover implement, review or consul
   assert.deepEqual(broadEntries(COPY, [run, wait, cancel]), [], "the three worker entries cover no other command");
   assert.deepEqual(broadEntries(COPY, [`${script} *`, `${script} consult *`, `${script} implement *`, `${script} review *`, "node *", 3]), [`${script} *`, `${script} consult *`, `${script} implement *`, `${script} review *`, "node *"]);
   assert.deepEqual(broadEntries(COPY, [`node "/opt/other/scripts/orch-codex.mjs" *`]), [], "an entry for another copy does not count");
+  // An entry written without quotes, as a person types it for a manual consult.
+  assert.deepEqual(broadEntries(COPY, [`node ${COPY}/scripts/orch-codex.mjs consult *`]), [`node ${COPY}/scripts/orch-codex.mjs consult *`]);
+});
+
+test("managed drop-ins are read in name order, without hidden files, folders or other extensions", () => {
+  const entry = (name, kind = "file") => ({ name, isFile: () => kind === "file", isSymbolicLink: () => kind === "link" });
+  const listing = [entry("90-sandbox.json"), entry(".disabled.json"), entry("10-base.json"), entry("20-link.json", "link"), entry("30-folder.json", "dir"), entry("notes.txt")];
+  assert.deepEqual(managedDropIns("/m.d", () => listing), ["/m.d/10-base.json", "/m.d/20-link.json", "/m.d/90-sandbox.json"]);
+  assert.deepEqual(managedDropIns("/none", () => { throw Object.assign(new Error("missing"), { code: "ENOENT" }); }), []);
+});
+
+test("a later managed file replaces an earlier one, and managed settings win over the project and the user", () => {
+  // 10-base.json says false, 90-sandbox.json says true: the later one wins.
+  assert.equal(effectiveSandboxEnabled({ managed: [undefined, false, true], user: false }), true);
+  assert.equal(effectiveSandboxEnabled({ managed: [true, undefined, false], projectLocal: true }), false);
+  // No managed value: the project's local file, then its shared file, then the user's file.
+  assert.equal(effectiveSandboxEnabled({ managed: [undefined], projectLocal: false, projectShared: true, user: true }), false);
+  assert.equal(effectiveSandboxEnabled({ projectShared: true, user: false }), true);
+  assert.equal(effectiveSandboxEnabled({ user: true }), true);
+  assert.equal(effectiveSandboxEnabled({}), false, "the sandbox is off by default");
+});
+
+test("with the sandbox off, the rows say that no entry is needed, but an unsafe entry still warns", () => {
+  const [run] = workerEntries(COPY);
+  const off = { kind: "root", problem: null };
+  const head = "no settings file that this check reads (user, project, managed) turns the Claude Bash sandbox on, so Codex workers need no sandbox exclusion. If the sandbox is on for you anyway, for example through a --settings file, ";
+  // A protected copy: the row still names the entries that would be missing.
+  assert.deepEqual(rowsFor([], off, { sandboxOn: false }), [["OK", `${head}add these sandbox.excludedCommands entries: ${workerEntries(COPY).join(" ; ")}`]]);
+  // With every entry in place, nothing is missing, so the row points to the guide.
+  assert.deepEqual(rowsFor(workerEntries(COPY), off, { sandboxOn: false }), [["OK", `${head}see guide/codex.md, section "The Claude sandbox"`]]);
+  // An entry for a copy that a session can change acts the moment the sandbox goes on.
+  const rows = rowsFor([run], { kind: null, problem: NOT_PROTECTED }, { sandboxOn: false });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0][0], "WARN");
+  assert.match(rows[0][1], /Remove them/);
+});
+
+test("on a copy that a session can change, an entry that lets consult out warns as well", () => {
+  const consult = `node ${COPY}/scripts/orch-codex.mjs consult *`;
+  assert.deepEqual(rowsFor([consult], { kind: null, problem: NOT_PROTECTED }), [
+    ["WARN", `these exclusion entries cover this copy (${COPY}): ${consult}. But ${NOT_PROTECTED}. Remove them: a session could change code that then runs with full access`]
+  ]);
 });
 
 test("the sandbox rows name each settings file that could not be used, before the other rows", () => {

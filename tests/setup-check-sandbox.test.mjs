@@ -3,14 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { copyProtection, workerEntries } from "../scripts/lib/protected-copy.mjs";
+import { copyProtection, managedDropIns, workerEntries } from "../scripts/lib/protected-copy.mjs";
 import { cleanEnv, makeTempDir, ROOT, runNode } from "./helpers.mjs";
 
 // The setup check also reads the managed settings files. Where one exists, the
 // rows depend on it, so these tests do not run there. They also need a
 // checkout that gets no exclusion: one that a user owns, not root.
 const MANAGED = ["/Library/Application Support/ClaudeCode/managed-settings.json", "/etc/claude-code/managed-settings.json"];
-const managed = MANAGED.find((file) => fs.existsSync(file));
+// The drop-in files of a managed-settings.d folder count as managed settings too.
+const MANAGED_DIRS = ["/Library/Application Support/ClaudeCode/managed-settings.d", "/etc/claude-code/managed-settings.d"];
+const managed = MANAGED.find((file) => fs.existsSync(file)) ?? MANAGED_DIRS.flatMap((dir) => managedDropIns(dir))[0];
 const protection = copyProtection(ROOT);
 const skip = managed ? `${managed} exists, so the rows depend on it` : protection.kind ? `this checkout counts as protected (${protection.kind})` : false;
 
@@ -26,6 +28,9 @@ esac
 
 const VARIABLE_ENTRY = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/orch-codex.mjs" *';
 const NO_EXCLUSION = `this copy (${ROOT}) gets no sandbox exclusion, because it is outside the Claude plugin cache`;
+// The Claude Bash sandbox is off by default, so a check without a sandbox setting says this.
+const SANDBOX_OFF = "no settings file that this check reads (user, project, managed) turns the Claude Bash sandbox on, so Codex workers need no sandbox exclusion";
+const SANDBOX_ON = JSON.stringify({ sandbox: { enabled: true } });
 
 // Runs the setup check with HOME in a temp folder, so ~/.claude/settings.json
 // is a temp file, with Codex on in config.json, and with a temp project folder
@@ -69,11 +74,38 @@ async function runCheck({ user, userMode, project = {}, projectDirs = [], codexE
   }
 }
 
-test("with no entries in any settings file, this checkout gets no sandbox exclusion", { skip }, async () => {
+test("with no settings at all, the sandbox is off and no exclusion is needed", { skip }, async () => {
   const { rows } = await runCheck();
   assert.equal(rows.length, 1, rows.join("\n"));
   assert.match(rows[0], /^OK +Codex worker sandbox: /);
+  assert.ok(rows[0].includes(SANDBOX_OFF), rows[0]);
+});
+
+test("with the sandbox on and no entries, this checkout gets no sandbox exclusion", { skip }, async () => {
+  const { rows } = await runCheck({ user: SANDBOX_ON });
+  assert.equal(rows.length, 1, rows.join("\n"));
+  assert.match(rows[0], /^OK +Codex worker sandbox: /);
   assert.ok(rows[0].includes(NO_EXCLUSION), rows[0]);
+});
+
+test("the project's local settings decide over the user's file whether the sandbox is on", { skip }, async () => {
+  const off = await runCheck({ user: SANDBOX_ON, project: { "settings.local.json": JSON.stringify({ sandbox: { enabled: false } }) } });
+  assert.ok(off.rows[0].includes(SANDBOX_OFF), off.rows[0]);
+  const on = await runCheck({ project: { "settings.local.json": SANDBOX_ON } });
+  assert.ok(on.rows[0].includes(NO_EXCLUSION), on.rows[0]);
+});
+
+test("the project's local file decides over its shared file, in both directions", { skip }, async () => {
+  const SANDBOX_OFF_JSON = JSON.stringify({ sandbox: { enabled: false } });
+  const localOff = await runCheck({ project: { "settings.json": SANDBOX_ON, "settings.local.json": SANDBOX_OFF_JSON } });
+  assert.ok(localOff.rows[0].includes(SANDBOX_OFF), localOff.rows[0]);
+  const localOn = await runCheck({ project: { "settings.json": SANDBOX_OFF_JSON, "settings.local.json": SANDBOX_ON } });
+  assert.ok(localOn.rows[0].includes(NO_EXCLUSION), localOn.rows[0]);
+});
+
+test("only true or false counts as a sandbox setting, so the string \"true\" leaves it off", { skip }, async () => {
+  const { rows } = await runCheck({ user: JSON.stringify({ sandbox: { enabled: "true" } }) });
+  assert.ok(rows[0].includes(SANDBOX_OFF), rows[0]);
 });
 
 test("project entries that cover this checkout's worker calls get a warning to remove them", { skip }, async () => {
@@ -86,7 +118,7 @@ test("project entries that cover this checkout's worker calls get a warning to r
 });
 
 test("a user entry with the variable text gets a warning that it matches no worker call", { skip }, async () => {
-  const { rows } = await runCheck({ user: JSON.stringify({ sandbox: { excludedCommands: [VARIABLE_ENTRY] } }) });
+  const { rows } = await runCheck({ user: JSON.stringify({ sandbox: { enabled: true, excludedCommands: [VARIABLE_ENTRY] } }) });
   assert.equal(rows.length, 2, rows.join("\n"));
   assert.match(rows[0], /^WARN +Codex worker sandbox: /);
   assert.ok(rows[0].includes(`the entry ${VARIABLE_ENTRY} matches no worker call`), rows[0]);
@@ -101,14 +133,15 @@ test("a project settings file that is not valid JSON gets a warning that names i
   assert.equal(rows.length, 2, rows.join("\n"));
   assert.match(rows[0], /^WARN +Codex worker sandbox: /);
   assert.ok(rows[0].includes(`the settings file ${path.join(projectSettings, "settings.json")} could not be read as JSON`), rows[0]);
-  assert.ok(rows[1].includes(NO_EXCLUSION), rows[1]);
+  assert.ok(rows[1].includes(SANDBOX_OFF), rows[1]);
   assert.ok(!stdout.includes(marker), "the check must not print the text of a settings file");
 });
 
 test("a settings file that this user may not read adds no row", { skip: skip || (process.getuid?.() === 0 ? "root reads every file" : false) }, async () => {
-  const { rows } = await runCheck({ user: JSON.stringify({ sandbox: { excludedCommands: [VARIABLE_ENTRY] } }), userMode: 0o000 });
+  const { rows } = await runCheck({ user: JSON.stringify({ sandbox: { enabled: true, excludedCommands: [VARIABLE_ENTRY] } }), userMode: 0o000 });
   assert.equal(rows.length, 1, rows.join("\n"));
-  assert.ok(rows[0].includes(NO_EXCLUSION), rows[0]);
+  // Claude Code cannot read that file either, so the sandbox counts as off.
+  assert.ok(rows[0].includes(SANDBOX_OFF), rows[0]);
 });
 
 test("with Codex off, the check prints no sandbox row at all", { skip }, async () => {
@@ -123,7 +156,7 @@ test("a project settings path that cannot be read for another reason gets a warn
   assert.equal(rows.length, 2, rows.join("\n"));
   assert.match(rows[0], /^WARN +Codex worker sandbox: /);
   assert.ok(rows[0].includes(`the settings file ${path.join(projectSettings, "settings.local.json")} could not be read (EISDIR)`), rows[0]);
-  assert.ok(rows[1].includes(NO_EXCLUSION), rows[1]);
+  assert.ok(rows[1].includes(SANDBOX_OFF), rows[1]);
 });
 
 test("the user settings come from CLAUDE_CONFIG_DIR when it is set", { skip }, async () => {

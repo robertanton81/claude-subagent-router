@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { FIXED_MODEL_AGENTS, dataDir, loadConfig } from "./lib/config.mjs";
 import { limitsFile, readLimitsState } from "./lib/context.mjs";
 import { logFile, readLogTail } from "./lib/log.mjs";
-import { broadEntries, copyProtection, deadVariableEntries, sandboxRows, workerCoverage } from "./lib/protected-copy.mjs";
+import { broadEntries, copyProtection, deadVariableEntries, effectiveSandboxEnabled, managedDropIns, sandboxRows, workerCoverage } from "./lib/protected-copy.mjs";
 import { codexPlatformSupported, codexState, describeTime } from "./lib/provider-state.mjs";
 import { askJev, findApiKey } from "./lib/typesafe.mjs";
 
@@ -78,20 +78,27 @@ if (config.codexEnabled && !codexPlatformSupported()) {
 // In a session with the Claude sandbox on, a Codex worker can write the
 // router's data folder only through an owner's sandbox exclusion entry. An
 // entry is safe only for a protected copy (scripts/lib/protected-copy.mjs).
-// This reads sandbox.excludedCommands from the user, managed and project
-// settings, and no other value. A cloned project can carry its own entries, so
+// This reads sandbox.excludedCommands and sandbox.enabled from the user,
+// managed and project settings, and no other value. A cloned project can carry its own entries, so
 // they count too. It does not prove that a call leaves the sandbox.
 if (config.codexEnabled && codexPlatformSupported()) {
   const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-  const settingsFiles = [
-    path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "settings.json"),
+  // Managed settings can also come as drop-in files in a managed-settings.d
+  // folder next to the managed file, merged after it (managedDropIns).
+  const managedFiles = [
     "/Library/Application Support/ClaudeCode/managed-settings.json",
+    ...managedDropIns("/Library/Application Support/ClaudeCode/managed-settings.d"),
     "/etc/claude-code/managed-settings.json",
-    path.join(process.cwd(), ".claude", "settings.json"),
-    path.join(process.cwd(), ".claude", "settings.local.json")
+    ...managedDropIns("/etc/claude-code/managed-settings.d")
   ];
+  const userFile = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "settings.json");
+  const projectShared = path.join(process.cwd(), ".claude", "settings.json");
+  const projectLocal = path.join(process.cwd(), ".claude", "settings.local.json");
+  const settingsFiles = [userFile, ...managedFiles, projectShared, projectLocal];
   const listed = [];
   const unreadable = [];
+  // sandbox.enabled by file, for the precedence below.
+  const enabledIn = new Map();
   for (const file of settingsFiles) {
     let text;
     try {
@@ -106,15 +113,18 @@ if (config.codexEnabled && codexPlatformSupported()) {
       continue;
     }
     try {
-      const entries = JSON.parse(text)?.sandbox?.excludedCommands;
-      if (Array.isArray(entries)) listed.push(...entries);
+      const sandbox = JSON.parse(text)?.sandbox;
+      if (Array.isArray(sandbox?.excludedCommands)) listed.push(...sandbox.excludedCommands);
+      if (typeof sandbox?.enabled === "boolean") enabledIn.set(file, sandbox.enabled);
     } catch {
       // The parse error quotes part of the text, so the row names the file only.
       unreadable.push({ file, json: true });
     }
   }
+  // Only a true or false counts. A --settings file is not seen here.
+  const sandboxOn = effectiveSandboxEnabled({ managed: managedFiles.map((file) => enabledIn.get(file)), projectLocal: enabledIn.get(projectLocal), projectShared: enabledIn.get(projectShared), user: enabledIn.get(userFile) });
   const { kind, problem } = copyProtection(root);
-  const sandbox = sandboxRows({ root, kind, problem, coverage: workerCoverage(root, listed), dead: deadVariableEntries(listed), broad: broadEntries(root, listed), unreadable });
+  const sandbox = sandboxRows({ root, kind, problem, coverage: workerCoverage(root, listed), dead: deadVariableEntries(listed), broad: broadEntries(root, listed), unreadable, sandboxOn });
   for (const [status, detail] of sandbox) {
     row(status, "Codex worker sandbox", detail);
   }
@@ -156,7 +166,10 @@ if (!config.jevEnabled) {
 }
 
 const limits = readLimitsState(config);
-if (limits.state === "ok" && limits.fiveHour === null && limits.sevenDay === null) {
+if (!config.jevEnabled) {
+  // The limit rules act through the routing table, so they need Jev on.
+  row("OK", "Status line log", "not needed while Jev is off: the limit rules act only through the routing");
+} else if (limits.state === "ok" && limits.fiveHour === null && limits.sevenDay === null) {
   row("WARN", "Status line log", `${limitsFile()} is fresh but holds no percentage, so the limit rule is off. Check the variable names in the snippet`);
 } else if (limits.state === "ok" && limits.fiveHourResetsAt === null && limits.sevenDayResetsAt === null) {
   row("WARN", "Status line log", `${limitsFile()} holds percentages but no reset time, so the pace rule cannot run. Paste the current scripts/statusline-snippet.sh again; it also reads RATE_5H_RESET and RATE_7D_RESET`);

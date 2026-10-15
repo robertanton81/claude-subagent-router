@@ -1,13 +1,28 @@
 # Changelog
 
+## 0.4.5
+
+Setup check:
+
+- **It says that no exclusion entry is needed while the Claude Bash sandbox is off.** It reads `sandbox.enabled` from the managed settings (with the `managed-settings.d` drop-in files), the project's local and shared files and the user's file, in Claude Code's order. It cannot see a `--settings` file, so for a protected copy the row still names the entries that would be missing. Before, every Codex user without the sandbox got a warning that pushed them to add entries they do not need.
+- **An entry written without quotes counts too,** for example `node /path/scripts/orch-codex.mjs consult *`. Before, only the quoted form that the plugin's own commands print was checked.
+- **An entry that lets `implement`, `review` or `consult` out warns on a working checkout too,** not only on a protected copy.
+- **The status line log is "not needed" while Jev is off.** The limit rules act only through the routing.
+
+Documentation:
+
+- The README update line names `claude plugin update` and a new session, not only the marketplace refresh. Setup marks Jev and the status line as optional, points Codex users with the sandbox to [The Claude sandbox](guide/codex.md#the-claude-sandbox), and the Use section has a first task to try.
+- [Setup](guide/setup.md) has a first Codex task, the sandbox step, a safe allow rule (the exact quoted path, no `*` in it, because an allow rule also approves a retry outside the sandbox), and notes on the settings command inside the sandbox and on the desktop app's `@inline` copy.
+- [Known limits](guide/known-limits.md) lists the sandbox stop. [Codex](guide/codex.md) states the `--brief` folder rule as the code applies it, says that a consult inside the sandbox fails, and says to run `implement`, `review` and `consult` from the project folder.
+
 ## 0.4.4
 
 Codex and the Claude sandbox:
 
-- **`--brief FILE`** for `implement`, `review --custom` and `consult`. It reads the task text from a file argument. A call with a `< FILE` redirect can never leave the sandbox; a call with `--brief FILE` can, when an owner excludes it on purpose. The plugin's own entries cover only `run`, `wait` and `cancel`. The file must lie in a system temp folder (`/tmp`, `/var/tmp`, or the per-user temp folder of macOS; the working folder and a `TMPDIR` elsewhere never count), must be a regular file with one hard link, must not be a credential file by its name or its real path, and must not hold a private key. It is opened so that a link in any part of its path refuses the open, also a folder swapped for a link after the checks (macOS 11 or newer: `O_NOFOLLOW_ANY`; Linux: the opened file's name in `/proc/self/fd`). On other systems `--brief` is refused.
+- **`--brief FILE`** for `implement`, `review --custom` and `consult`. It reads the task text from a file argument. A call with a `< FILE` redirect can never leave the sandbox; a call with `--brief FILE` can, when an owner excludes it on purpose. The plugin's own entries cover only `run`, `wait` and `cancel`. The file must lie under `/tmp`, or under the folder that `TMPDIR` names when that folder is a system temp folder (`/tmp` or `/var/tmp` on Linux, `/tmp` or the per-user temp folder on macOS); the working folder and a `TMPDIR` elsewhere never count. It must be a regular file with one hard link, must not be a credential file by its name or its real path, and must not hold a private key. It is opened so that a link in any part of its path refuses the open, also a folder swapped for a link after the checks (macOS 11 or newer: `O_NOFOLLOW_ANY`; Linux: the opened file's name in `/proc/self/fd`). On other systems `--brief` is refused.
 - **The script removes `CODEX_API_KEY` and `OPENAI_API_KEY` itself**, so no `env -u` wrapper is needed. A call that starts with `env` never leaves the sandbox.
 - **A worker inside the sandbox stops with a clear message.** When the request claim fails with a permission error, `run` says that no job started and that the request is unchanged, and tells the main session to use a Claude worker. For a protected copy it prints the exact `sandbox.excludedCommands` entries. For a working checkout it explains why the copy must not leave the sandbox. See [The Claude sandbox](guide/codex.md#the-claude-sandbox).
-- **The setup check reports the worker exclusion:** whether the running copy is protected (in the plugin cache, or owned by root up to `/`) and whether the entries for `run`, `wait` and `cancel` are in the user, managed or project settings. It warns about an entry that names a copy a session can change, an entry that also lets `implement`, `review` or `consult` out, an entry with the unexpanded `${CLAUDE_PLUGIN_ROOT}`, and a settings file that is not valid JSON.
+- **The setup check reports the worker exclusion:** whether the running copy is protected (in the plugin cache, or owned by root up to `/`) and whether the entries for `run`, `wait` and `cancel` are in the user, managed or project settings. It checks the entries for the running copy and warns about an entry that covers it although a session can change it, an entry that also lets `implement`, `review` or `consult` out, an entry with the unexpanded `${CLAUDE_PLUGIN_ROOT}`, and a settings file that is not valid JSON.
 - **Fixed: an entry with the text `${CLAUDE_PLUGIN_ROOT}` matches no worker call.** Claude Code fills in the path before the worker writes its command, so the entry must hold the filled-in path.
 
 Security:

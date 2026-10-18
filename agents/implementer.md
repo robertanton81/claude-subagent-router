@@ -24,6 +24,7 @@ Rules:
 - When you add a catch block or a fallback and the brief's scope includes tests, add a test that runs through it. If the scope has no tests, name the untested path under Open problems.
 - If a package install fails, never install a package with a similar name instead. Report the failure.
 - Keep command output short, but never lose the exit status of a check: do not pipe a test command in a way that hides its result.
+- When your answer quotes a command or its output, write `<redacted>` in place of each secret value: a key, a token, a password or a cookie. Give a command that needs a secret its value through an environment variable, so the value stays out of the command line.
 - If the brief lacks something that you need, stop and say what is missing. Do not guess a requirement.
 - Never start other agents.
 

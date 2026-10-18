@@ -1289,3 +1289,59 @@ test("a review that the hook moves to Codex keeps its brief as custom review ins
     assert.deepEqual(readLog(tempDir).map((record) => record.review_scope), ["custom", "uncommitted", "uncommitted", "base:main"]);
   });
 });
+
+// Test values with the shape of a secret, built at run time so that no file
+// holds one. TOKEN_BODY is checked on its own, because a token that loses its
+// "_" is no longer a match for the mask but still leaks its body.
+const TOKEN_BODY = "A1b2".repeat(9);
+const FAKE_TOKEN = ["gh", "p_", TOKEN_BODY].join("");
+const FAKE_PASSWORD = ["plain", "words", "not", "real"].join("-");
+const pem = (word) => `${"-".repeat(5)}${word} OPENSSH PRIVATE KEY${"-".repeat(5)}`;
+
+test("secret-shaped values in a brief are masked before the brief goes to Jev", async () => {
+  await withJev({ body: jevBody() }, async ({ jev, tempDir, env }) => {
+    const call = agentCall({
+      tool_input: {
+        description: `Fix the login for ${TEST_KEY}`,
+        prompt: `Goal: fix the login.\nThe failing run printed ${FAKE_TOKEN}\nDB_PASSWORD=${FAKE_PASSWORD}`,
+        subagent_type: "subagent-router:implementer"
+      }
+    });
+    const result = await runNode(HOOK, { stdin: call, env });
+    assert.deepEqual([result.code, result.stdout], [0, ""], "Jev's answer agrees with the call, so nothing is rewritten");
+    assert.equal(jev.state.requests.length, 1);
+    const brief = jev.state.requests[0].body.state.brief;
+    assert.deepEqual(brief, {
+      description: "Fix the login for <redacted>",
+      task: "Goal: fix the login.\nThe failing run printed <redacted>\nDB_PASSWORD=<redacted>"
+    });
+    const sent = JSON.stringify(jev.state.requests[0].body);
+    for (const value of [TOKEN_BODY, FAKE_PASSWORD, TEST_KEY]) {
+      assert.ok(!sent.includes(value), "no secret-shaped value reaches Jev");
+    }
+
+    const [record] = readLog(tempDir);
+    assert.equal(record.redactions, 3);
+    assert.notEqual(record.reason, "brief_withheld");
+    assert.equal(typeof record.jev?.kind, "string", "Jev still answers the masked brief");
+  });
+});
+
+test("a brief that holds a private key is not sent to Jev, and the call runs as written", async () => {
+  const cases = [
+    ["key in the prompt", { description: "Check the deploy key", prompt: `Goal: check why the deploy key fails.\n${pem("BEGIN")}\nabc\n${pem("END")}` }],
+    ["key in the description", { description: `Check ${pem("BEGIN")}`, prompt: "Goal: check why the deploy key fails." }]
+  ];
+  for (const [name, texts] of cases) {
+    await withJev({ body: jevBody() }, async ({ jev, tempDir, env }) => {
+      const call = agentCall({ tool_input: { ...texts, subagent_type: "subagent-router:implementer" } });
+      const result = await runNode(HOOK, { stdin: call, env });
+      assert.deepEqual([result.code, result.stdout], [0, ""], `${name}: the call is passed on unchanged`);
+      assert.equal(jev.state.requests.length, 0, `${name}: nothing may reach Jev`);
+
+      const [record] = readLog(tempDir);
+      assert.deepEqual([record.action, record.reason, record.jev], ["pass", "brief_withheld", null], name);
+      assert.deepEqual([record.final.agent, record.final.model], [record.requested.agent, record.requested.model], name);
+    });
+  }
+});

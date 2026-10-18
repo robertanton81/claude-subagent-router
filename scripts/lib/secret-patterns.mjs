@@ -63,11 +63,21 @@ export function holdsPrivateKey(text) {
 
 const MASK = "<redacted>";
 
-// Each shape masks its whole match.
+// Each shape masks its whole match. The lengths are lower bounds, below the
+// lengths that the services issue today.
 const TOKEN_SHAPES = [
   /\bsk-[A-Za-z0-9_-]{20,}/g,
-  /\bghp_[A-Za-z0-9]{20,}/g,
+  // GitHub: ghp_ (a classic personal token), gho_ (what the gh CLI stores
+  // after a browser login), ghu_, ghs_ and ghr_ (app tokens).
+  /\bgh[pousr]_[A-Za-z0-9]{20,}/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+  /\bnpm_[A-Za-z0-9]{30,}/g,
+  /\bhf_[A-Za-z0-9]{30,}/g,
+  // Stripe secret and restricted keys.
+  /\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}/g,
+  // A Google API key and a GitLab personal token.
+  /\bAIza[A-Za-z0-9_-]{30,}/g,
+  /\bglpat-[A-Za-z0-9_-]{20,}/g,
   /\bAKIA[A-Z0-9]{16}\b/g,
   /\bxox[bapr]-[A-Za-z0-9-]{10,}/g,
   // A JWT. It starts only where no token character stands before it. With \b,

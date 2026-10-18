@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.6
+
+Privacy:
+
+- **Secrets are masked before a brief or a worker's checks go to TypeSafe.** A masked value is replaced by `<redacted>`. The routing hook masks the description and the brief. The log hook masks the whole worker answer first, and only then cuts out the `Verification:` part: the cut drops `_` from the first line, so a token there would escape a later mask. The cut takes the lines where the unmasked answer has its labels, because a mask can take a label as a value (after a line that ends with `token:`, the next line's first word is masked). When masking changes the line count, nothing is sent, and the verification record gets the error `lines_changed`. The masks are the same as for the finding triage, plus the TypeSafe key itself. A brief or an answer that holds a line of a private key is not sent: the call runs as written, with the reason `brief_withheld`, and the verification record gets the error `withheld`. A record of a masked send counts the masked values in `redactions`. The dispatch log keeps briefs as before. Before, only the finding triage masked anything, although briefs and checks can quote command output. See [What leaves your machine](guide/privacy.md).
+- **More token shapes are masked on their own, also in the finding triage:** GitHub `gho_`, `ghu_`, `ghs_` and `ghr_` tokens (`gho_` is what the `gh` CLI stores after a browser login), and npm, Hugging Face, Stripe, Google API and GitLab tokens. Before, these were masked only after a secret word and `:` or `=`.
+- **The debugger and implementer workers write `<redacted>`** for a secret in a quoted command or output, and pass a secret to a command through an environment variable.
+
 ## 0.4.5
 
 Setup check:

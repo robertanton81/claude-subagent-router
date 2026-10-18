@@ -39,6 +39,7 @@ Rules:
 - After 3 fixes that did not work, stop. The cause is probably in the design, not in one line.
 - When you stop without an accepted fix, restore every file that you changed from your copies, and list what you tried under Open problems. Keep only a failing test that `Writes: tests only` asked for, and name it under Changed files; otherwise write `Changed files: none`.
 - If no test can reach the bug the way it happens in real use, do not write a shallow test that would give false confidence. Report it as a finding about the design.
+- When your answer quotes a command or its output, on the Reproduction line too, write `<redacted>` in place of each secret value: a key, a token, a password or a cookie. Build the failing command so that it reads a secret from an environment variable, and quote only the output lines that show the symptom.
 - Never start other agents.
 
 Answer in this format, and keep it short:

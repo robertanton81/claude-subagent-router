@@ -63,6 +63,37 @@ test("known token shapes are masked and counted", () => {
   }
 });
 
+test("more token shapes are masked on their own, with no secret word before them", () => {
+  const body = "Q7".repeat(20);
+  const cases = {
+    githubOauth: `gho_${body}`,
+    githubUser: `ghu_${body}`,
+    githubServer: `ghs_${body}`,
+    githubRefresh: `ghr_${body}`,
+    npm: `npm_${body}`,
+    huggingFace: `hf_${body}`,
+    stripeSecret: `sk_live_${body}`,
+    stripeRestricted: `rk_test_${body}`,
+    google: `AIza${body}`,
+    gitlab: `glpat-${body}`
+  };
+  for (const [name, token] of Object.entries(cases)) {
+    const result = redactSecrets(`the run printed ${token} and stopped`);
+    assert.deepEqual(result, { text: "the run printed <redacted> and stopped", count: 1, withheld: false }, name);
+    // Glued to a word, the same token is part of a longer name, so \b stops it.
+    const glued = `the run printed x${token} and stopped`;
+    assert.deepEqual(redactSecrets(glued), { text: glued, count: 0, withheld: false }, `${name} glued`);
+  }
+});
+
+test("names that only start like a token are not masked", () => {
+  // The last two are long enough to match if the npm or hf body took "_".
+  const long = "a".repeat(20);
+  for (const text of ["npm_config_cache=/tmp/x", "the hf_hub_download helper", "gho_short", "AIza is a prefix", "glpat-x", `npm_${long}_${long}`, `hf_${long}_${long}`]) {
+    assert.deepEqual(redactSecrets(text), { text, count: 0, withheld: false }, text);
+  }
+});
+
 test("the value after a secret-like name is masked, the name stays", () => {
   for (const [input, output] of [["password = hunter2", "password = <redacted>"], ['api_key: "zzz"', "api_key: <redacted>"], ["TOKEN=abc", "TOKEN=<redacted>"]]) {
     assert.deepEqual(redactSecrets(input), { text: output, count: 1, withheld: false });
@@ -251,7 +282,9 @@ const HOSTILE = {
   "key: a long PuTTY version": `PuTTY-User-Key-File-${"1".repeat(200000)}`,
   "key: a long SSH2 label": `${"-".repeat(4)} BEGIN SSH2 ${"A ".repeat(100000)}`,
   "key: one long base64 run": "A".repeat(200000),
-  "key: many base64 runs": `${"B".repeat(40)} `.repeat(5000)
+  "key: many base64 runs": `${"B".repeat(40)} `.repeat(5000),
+  "token: many Google keys one character short": `AIza${"a".repeat(29)} `.repeat(6000),
+  "token: many GitLab tokens one character short": `glpat-${"a".repeat(19)} `.repeat(8000)
 };
 for (const [name, text] of Object.entries(HOSTILE)) {
   test(`linear time on hostile input: ${name}`, () => {

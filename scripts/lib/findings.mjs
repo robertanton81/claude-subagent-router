@@ -30,26 +30,59 @@ export function reportsNoWrite(result) {
   return result.startsWith("CODEX_FAILED") || result.split("\n").some((line) => NO_FILES.test(plainLine(line)));
 }
 
+// The line numbers of the verification part of a worker result: the
+// "Verification:" line, and the first "Open problems:" line after it (or the
+// line count when there is none). null when the result has no
+// "Verification:" line. Markdown around the two labels is allowed, for the
+// same reason as above.
+function verificationRange(lines) {
+  const start = lines.findIndex((line) => /^Verification:/i.test(plainLine(line)));
+  if (start === -1) {
+    return null;
+  }
+  const end = lines.findIndex((line, index) => index > start && /^Open problems:/i.test(plainLine(line)));
+  return { start, end: end === -1 ? lines.length : end };
+}
+
+function cutVerification(lines, { start, end }) {
+  const first = plainLine(lines[start]).replace(/^Verification:\s*/i, "");
+  return [first, ...lines.slice(start + 1, end)].join("\n").trim();
+}
+
 // The part of a worker result between "Verification:" and "Open problems:",
-// or null when the result has no such line. Markdown around the two labels is
-// allowed, for the same reason as above.
+// or null when the result has no such line.
 export function verificationText(result) {
   if (typeof result !== "string") {
     return null;
   }
   const lines = result.split("\n");
-  const start = lines.findIndex((line) => /^Verification:/i.test(plainLine(line)));
-  if (start === -1) {
-    return null;
+  const range = verificationRange(lines);
+  return range === null ? null : cutVerification(lines, range);
+}
+
+// The verification part of a masked result, cut at the lines where the raw
+// result has its labels. The masked text is not searched for labels, because
+// a mask can take a label as a value: after a line that ends with "token:",
+// the next line's first word is masked. A masked "Verification:" would lose
+// the part, and a masked "Open problems:" would let the cut run on into text
+// that must stay on the machine. Masks keep the line count, except a
+// registered secret with a line break inside; then the lines no longer match,
+// and the result is { error: "lines_changed" }. Otherwise { text }, with text
+// null when the raw result has no verification part.
+export function maskedVerificationText(raw, masked) {
+  if (typeof raw !== "string" || typeof masked !== "string") {
+    return { text: null };
   }
-  const collected = [plainLine(lines[start]).replace(/^Verification:\s*/i, "")];
-  for (const line of lines.slice(start + 1)) {
-    if (/^Open problems:/i.test(plainLine(line))) {
-      break;
-    }
-    collected.push(line);
+  const rawLines = raw.split("\n");
+  const range = verificationRange(rawLines);
+  if (range === null) {
+    return { text: null };
   }
-  return collected.join("\n").trim();
+  const maskedLines = masked.split("\n");
+  if (maskedLines.length !== rawLines.length) {
+    return { error: "lines_changed" };
+  }
+  return { text: cutVerification(maskedLines, range) };
 }
 
 export const PARSER_VERSION = 3;

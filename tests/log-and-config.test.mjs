@@ -11,7 +11,7 @@ import { appendLog, logFile, logMaxBytes, readLogTail, rotatedLogFile, truncate 
 import { QUESTIONS, buildRequest } from "../scripts/lib/questions.mjs";
 import { JevError, readAnswers } from "../scripts/lib/typesafe.mjs";
 import { lastWriterFamily, readLimitsState, recordWriterDispatch, recordWriterLaunch, recordWriterStop } from "../scripts/lib/context.mjs";
-import { countFindings, reportsNoWrite, verificationText } from "../scripts/lib/findings.mjs";
+import { countFindings, maskedVerificationText, reportsNoWrite, verificationText } from "../scripts/lib/findings.mjs";
 import { CLAUDE_FALLBACK, FIVE_HOURS_MS, SEVEN_DAYS_MS, claudeCapNotice, claudeNotice, claudeState, codexState, firstNotice, windowVerdict } from "../scripts/lib/provider-state.mjs";
 import { readRouteLine } from "../scripts/lib/route-line.mjs";
 import { PS_TIMEOUT_MS } from "../scripts/lib/writer-lock.mjs";
@@ -1338,6 +1338,15 @@ test("the verification part is found also when its labels use markdown", () => {
   assert.equal(verificationText("Changed files: a.js\nOpen problems: none"), null);
 });
 
+test("the masked verification part is cut at the lines where the raw result has its labels", () => {
+  const raw = "Changed files: a.js\nVerification: npm test\nOpen problems: none";
+  // A mask took both labels as values; the cut still ends before "Open problems".
+  assert.deepEqual(maskedVerificationText(raw, "Changed files: a.js\n<redacted> npm test\n<redacted> problems: none"), { text: "<redacted> npm test" });
+  assert.deepEqual(maskedVerificationText("Changed files: a.js\nOpen problems: none", "Changed files: a.js\nOpen problems: none"), { text: null });
+  // A registered secret with a line break inside removes a line.
+  assert.deepEqual(maskedVerificationText(raw, "Changed files: a.js <redacted>\nOpen problems: none"), { error: "lines_changed" });
+});
+
 const VERIFY_STOP = {
   hook_event_name: "SubagentStop",
   session_id: "s",
@@ -1487,6 +1496,120 @@ test("a damaged labels file costs only the triage line, not the session facts", 
     assert.match(result.stderr, /triage status could not be read/);
     assert.ok(readLog(tempDir).some((r) => r.event === "hook_error" && /triage status/.test(r.error)));
   } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+// Test values with the shape of a secret, built at run time so that no file
+// holds one. VERIFY_TOKEN_BODY is checked on its own: the cut of the
+// verification part drops "_" from its first line, and a token without its
+// "_" no longer matches the mask but still leaks its body.
+const VERIFY_TOKEN_BODY = "A1b2".repeat(9);
+const VERIFY_FAKE_TOKEN = ["gh", "p_", VERIFY_TOKEN_BODY].join("");
+const VERIFY_FAKE_PASSWORD = ["plain", "words", "not", "real"].join("-");
+
+test("the worker's whole answer is masked before its verification part goes to Jev", async () => {
+  const tempDir = makeTempDir();
+  const jev = await startFakeJev(verificationReply("passed"));
+  try {
+    const env = cleanEnv(tempDir, { ORCH_TYPESAFE_URL: jev.url, TYPESAFE_API_KEY: "test-key-not-a-secret" });
+    // The token on the first line is outside the verification part: it stays
+    // on the machine, but `redactions` counts it, since the whole answer is masked.
+    const answer = [
+      `Changed files: src/login.js (the old code held ${VERIFY_FAKE_TOKEN})`,
+      `**Verification:** npm test: 3 pass, and the run printed ${VERIFY_FAKE_TOKEN}`,
+      `DB_PASSWORD=${VERIFY_FAKE_PASSWORD}, key test-key-not-a-secret`,
+      "**Open problems:** none"
+    ].join("\n");
+    const result = await runNode("scripts/log-hook.mjs", { stdin: JSON.stringify({ ...VERIFY_STOP, last_assistant_message: answer }), env });
+    assert.deepEqual([result.code, result.stdout], [0, ""]);
+
+    assert.equal(jev.state.requests.length, 1);
+    assert.deepEqual(jev.state.requests[0].body.state, {
+      verification: "npm test: 3 pass, and the run printed <redacted>\nDB_PASSWORD=<redacted>, key <redacted>"
+    });
+    const sent = JSON.stringify(jev.state.requests[0].body);
+    for (const value of [VERIFY_TOKEN_BODY, VERIFY_FAKE_PASSWORD, "test-key-not-a-secret"]) {
+      assert.ok(!sent.includes(value), "no secret-shaped value reaches Jev");
+    }
+    const verification = readLog(tempDir).find((record) => record.event === "verification");
+    assert.deepEqual([verification.outcome, verification.redactions], ["passed", 4]);
+  } finally {
+    await jev.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a worker's answer that holds a private key sends nothing to Jev and logs why", async () => {
+  const tempDir = makeTempDir();
+  const jev = await startFakeJev(verificationReply("passed"));
+  try {
+    const env = cleanEnv(tempDir, { ORCH_TYPESAFE_URL: jev.url, TYPESAFE_API_KEY: "test-key-not-a-secret" });
+    const line = (word) => `${"-".repeat(5)}${word} RSA PRIVATE KEY${"-".repeat(5)}`;
+    // The second answer has the key line outside the verification part: the
+    // whole answer counts, so its key body below cannot slip through.
+    const answers = [
+      ["key line in the verification part", `Changed files: none\nVerification: the key file starts with ${line("BEGIN")}\nOpen problems: none`],
+      ["key line before it", `Changed files: none (the key file starts with ${line("BEGIN")})\nVerification: npm test: 3 pass\nOpen problems: none`]
+    ];
+    for (const [index, [name, answer]] of answers.entries()) {
+      const result = await runNode("scripts/log-hook.mjs", { stdin: JSON.stringify({ ...VERIFY_STOP, agent_id: `a${index}`, last_assistant_message: answer }), env });
+      assert.deepEqual([result.code, result.stdout], [0, ""], name);
+    }
+    assert.equal(jev.state.requests.length, 0, "nothing may reach Jev");
+
+    const records = readLog(tempDir).filter((record) => record.event === "verification");
+    assert.deepEqual(records.map((record) => [record.agent_id, record.error, record.outcome]), [["a0", "withheld", undefined], ["a1", "withheld", undefined]]);
+  } finally {
+    await jev.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a mask that takes a label as a value neither loses the verification part nor sends the open problems", async () => {
+  const tempDir = makeTempDir();
+  const jev = await startFakeJev(verificationReply("passed"));
+  try {
+    const env = cleanEnv(tempDir, { ORCH_TYPESAFE_URL: jev.url, TYPESAFE_API_KEY: "test-key-not-a-secret" });
+    // A line that ends with "token:" makes the name rule mask the next line's
+    // first word: here "Verification:", "-" and "Open".
+    const answers = [
+      ["plain labels", "Changed files: src/a.js\nNotes on the token:\nVerification: npm test: 3 pass\nRotate the old token:\nOpen problems: LOCAL_ONLY_SENTINEL"],
+      ["list labels", "Changed files: src/a.js\nNotes on the token:\n- Verification: npm test: 3 pass\nRotate the old token:\nOpen problems: LOCAL_ONLY_SENTINEL"]
+    ];
+    for (const [index, [name, answer]] of answers.entries()) {
+      const result = await runNode("scripts/log-hook.mjs", { stdin: JSON.stringify({ ...VERIFY_STOP, agent_id: `a${index}`, last_assistant_message: answer }), env });
+      assert.deepEqual([result.code, result.stdout], [0, ""], name);
+    }
+    assert.deepEqual(
+      jev.state.requests.map((request) => request.body.state),
+      [{ verification: "<redacted> npm test: 3 pass\nRotate the old token:" }, { verification: "<redacted> Verification: npm test: 3 pass\nRotate the old token:" }]
+    );
+    assert.ok(!JSON.stringify(jev.state.requests).includes("LOCAL_ONLY_SENTINEL"), "the open problems stay on the machine");
+    const records = readLog(tempDir).filter((record) => record.event === "verification");
+    assert.deepEqual(records.map((record) => [record.agent_id, record.outcome, record.redactions]), [["a0", "passed", 2], ["a1", "passed", 2]]);
+  } finally {
+    await jev.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("when masking changes the line count, nothing goes to Jev and the log says why", async () => {
+  const tempDir = makeTempDir();
+  const jev = await startFakeJev(verificationReply("passed"));
+  try {
+    // The key is registered as a secret, and a key with a line break inside
+    // turns two lines of the answer into one.
+    const key = "test-key-not\na-secret";
+    const env = cleanEnv(tempDir, { ORCH_TYPESAFE_URL: jev.url, TYPESAFE_API_KEY: key });
+    const answer = `Changed files: none\nVerification: the run printed ${key}\nOpen problems: none`;
+    const result = await runNode("scripts/log-hook.mjs", { stdin: JSON.stringify({ ...VERIFY_STOP, last_assistant_message: answer }), env });
+    assert.deepEqual([result.code, result.stdout], [0, ""]);
+    assert.equal(jev.state.requests.length, 0, "nothing may reach Jev");
+    const records = readLog(tempDir).filter((record) => record.event === "verification");
+    assert.deepEqual(records.map((record) => [record.error, record.outcome, record.redactions]), [["lines_changed", undefined, 1]]);
+  } finally {
+    await jev.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

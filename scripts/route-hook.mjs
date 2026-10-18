@@ -18,10 +18,11 @@ import { fileURLToPath } from "node:url";
 import { CODEX_JOB_KIND, DEFAULT_MODEL, FIXED_MODEL_AGENTS, REDIRECTS, WORKER_SET, WRITER_FAMILY, loadConfig } from "./lib/config.mjs";
 import { existingRequestId, workerPrompt, writeRequest } from "./lib/codex-request.mjs";
 import { lastWriterFamily, recordWriterDispatch } from "./lib/context.mjs";
-import { appendLog, registerSecret, truncate } from "./lib/log.mjs";
+import { appendLog, registerSecret, registeredSecrets, truncate } from "./lib/log.mjs";
 import { CLAUDE_FALLBACK, claudeCapNotice, claudeNotice, claudeState, codexNotice, codexState, firstNotice } from "./lib/provider-state.mjs";
 import { readRouteLine } from "./lib/route-line.mjs";
 import { completenessShadow, decideModel, decideRoute, writerLockApplies } from "./lib/routing-table.mjs";
+import { redactSecrets } from "./lib/secret-patterns.mjs";
 import { askJev, findApiKey } from "./lib/typesafe.mjs";
 import {
   CLAUDE_START_MAX_MS,
@@ -139,9 +140,22 @@ async function decide(input, toolInput, requested, config, record, providers) {
   }
   registerSecret(key);
 
+  // Secret-shaped values are masked before the brief leaves the machine. A
+  // brief that holds a line of a private key is not sent at all: the call then
+  // runs as written. The log keeps the brief as it was, on this machine.
+  const secrets = registeredSecrets();
+  const description = redactSecrets(toolInput.description, secrets);
+  const prompt = redactSecrets(toolInput.prompt, secrets);
+  if (description.withheld || prompt.withheld) {
+    return unchanged("pass", "brief_withheld");
+  }
+  if (description.count + prompt.count > 0) {
+    record.redactions = description.count + prompt.count;
+  }
+
   let jev;
   try {
-    jev = await askJev({ description: toolInput.description, prompt: toolInput.prompt }, config, key);
+    jev = await askJev({ description: description.text, prompt: prompt.text }, config, key);
   } catch (error) {
     record.jev = { error: error.code ?? "unknown", detail: error.message, key_source: source };
     return unchanged("pass", `error_${error.code ?? "unknown"}`);

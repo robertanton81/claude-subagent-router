@@ -84,6 +84,7 @@ In these cases the routing hook does not route the call: the agent type and the 
 | The mode is `off`. | `mode_off` |
 | Jev is off. | `jev_disabled` |
 | The hook found no key. | `error_no_key` |
+| The brief holds a line of a private key, so it is not sent to Jev. | `brief_withheld` |
 | The Jev call failed, for example on a timeout or an HTTP error. | a reason that starts with `error_` |
 | Jev is not sure of the kind of task (below `kindGate`). | `low_confidence` |
 | Jev's answers disagree, for example a search that changes files. | `answers_disagree` |

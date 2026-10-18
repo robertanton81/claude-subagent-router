@@ -10,8 +10,9 @@ import fs from "node:fs";
 
 import { REVIEWER_SET, WORKER_SET, WRITER_FAMILY, loadConfig } from "./lib/config.mjs";
 import { recordWriterLaunch, recordWriterStop } from "./lib/context.mjs";
-import { countFindings, reportsNoWrite, verificationText } from "./lib/findings.mjs";
-import { appendLog, registerSecret, truncate } from "./lib/log.mjs";
+import { countFindings, maskedVerificationText, reportsNoWrite, verificationText } from "./lib/findings.mjs";
+import { appendLog, registerSecret, registeredSecrets, truncate } from "./lib/log.mjs";
+import { redactSecrets } from "./lib/secret-patterns.mjs";
 import { usageErrorRecord, usageWaitBudget, usageWaitMs, verificationBudget, waitForTranscriptUsage } from "./lib/transcript-usage.mjs";
 import { askVerification, findApiKey } from "./lib/typesafe.mjs";
 import { confirmClaudeWriterLock, releaseClaudeWriterLock } from "./lib/writer-lock.mjs";
@@ -86,13 +87,12 @@ async function logUsage(input, base) {
 // its own record. The stop record is already written, so a slow or killed call
 // loses only this label, and the report then reads the words of the result.
 // It runs only while Jev is on and the mode is not "off", like the routing,
-// and sends only the verification part of the result.
+// and sends only the verification part of the result, with secrets masked.
 async function logVerification(input, config, base) {
   if (!config.jevEnabled || config.mode === "off" || !WORKER_SET.has(input.agent_type)) {
     return;
   }
-  const text = verificationText(input.last_assistant_message);
-  if (!text) {
+  if (!verificationText(input.last_assistant_message)) {
     return;
   }
   const { key, source } = findApiKey();
@@ -101,6 +101,28 @@ async function logVerification(input, config, base) {
   }
   registerSecret(key);
   const record = { ...base, event: "verification", agent_id: input.agent_id ?? null, agent_type: input.agent_type };
+  // Secret-shaped values are masked in the whole answer first, and only then
+  // is the verification part cut out. The cut drops "_", "*" and "`" from the
+  // first line, so a token such as ghp_... there would no longer match a mask
+  // after it. The cut takes the lines where the raw answer has its labels,
+  // since a mask can take a label as a value. An answer that holds a line of a
+  // private key is not sent at all. `redactions` counts the masks in the whole
+  // answer, not only in the part that is sent.
+  const masked = redactSecrets(input.last_assistant_message, registeredSecrets());
+  if (masked.withheld) {
+    appendLog({ ...record, error: "withheld", key_source: source });
+    return;
+  }
+  if (masked.count > 0) {
+    record.redactions = masked.count;
+  }
+  // The raw answer has a verification part (checked above), and with the same
+  // line count every masked line still holds text, so `text` is never empty.
+  const { text, error } = maskedVerificationText(input.last_assistant_message, masked.text);
+  if (error) {
+    appendLog({ ...record, error, key_source: source });
+    return;
+  }
   try {
     const timeoutMs = verificationBudget(elapsedMs(), config.jevTimeoutMs);
     const answer = await askVerification(text, config, key, timeoutMs);

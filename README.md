@@ -113,7 +113,7 @@ Every limit, with details, is in [Known limits](guide/known-limits.md).
 
 ## Documentation
 
-[Setup](guide/setup.md) · [Configuration](guide/configuration.md) · [What leaves your machine](guide/privacy.md) · [How the routing works](guide/routing.md) · [When a plan is near its limit](guide/usage-limits.md) · [The writer lock](guide/writer-lock.md) · [Codex](guide/codex.md) · [TypeSafe and Jev](guide/jev.md) · [The report and the log](guide/report-and-log.md) · [The review skill](guide/review.md) · [Finding triage](guide/finding-triage.md) (experimental, off by default) · [Known limits](guide/known-limits.md) · [Offline evaluation](EVALUATION.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
+[Setup](guide/setup.md) · [Configuration](guide/configuration.md) · [What leaves your machine](guide/privacy.md) · [How the routing works](guide/routing.md) · [When a plan is near its limit](guide/usage-limits.md) · [The writer lock](guide/writer-lock.md) · [Codex](guide/codex.md) · [TypeSafe and Jev](guide/jev.md) · [The report and the log](guide/report-and-log.md) · [The review skill](guide/review.md) · [Finding triage](guide/finding-triage.md) (experimental, off by default) · [Known limits](guide/known-limits.md) · [Offline evaluation](EVALUATION.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md) · [Build notes](HOW-THIS-WAS-BUILT.md)
 
 ## Develop the plugin
 

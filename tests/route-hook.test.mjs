@@ -1345,3 +1345,110 @@ test("a brief that holds a private key is not sent to Jev, and the call runs as 
     });
   }
 });
+
+test("the effort table writes to the log and never changes a call", async () => {
+  // A route that the hook rewrites: the rewrite must carry no effort. The brief is
+  // not self-contained, so the hard task stays on Claude.
+  await withJev({ body: jevBody({ kind: "implement", difficulty: 2, selfContained: 0.1 }) }, async ({ tempDir, env }) => {
+    const result = await runNode(HOOK, { stdin: agentCall(), env });
+    const sent = JSON.parse(result.stdout).hookSpecificOutput.updatedInput;
+    assert.equal(sent.model, "opus", "the route itself still applies");
+    assert.equal("effort" in sent, false, "the table only watches, so the call gets no level");
+    const [record] = readLog(tempDir);
+    assert.deepEqual(record.effort, { proposed: "high", reason: "difficulty_2", worker_default: "high" });
+    assert.equal(record.requested_effort, undefined);
+  });
+
+  // A route that already agrees, where only the level differs from the worker's
+  // file: the hook must stay silent, because an effort-only rewrite is not built.
+  await withJev({ body: jevBody({ kind: "implement", difficulty: 1 }) }, async ({ tempDir, env }) => {
+    const result = await runNode(HOOK, { stdin: agentCall(), env });
+    assert.equal(result.stdout, "", "no output means that the call runs as written");
+    const [record] = readLog(tempDir);
+    assert.equal(record.action, "agree");
+    assert.equal(record.effort.proposed, "medium");
+  });
+});
+
+test("a level that the main session names stays in the call and in the log", async () => {
+  const named = agentCall({
+    tool_input: { description: "Add retry", prompt: "Goal: add a retry.", subagent_type: "subagent-router:implementer", effort: "low" }
+  });
+  await withJev({ body: jevBody({ kind: "implement", difficulty: 2 }) }, async ({ tempDir, env }) => {
+    const result = await runNode(HOOK, { stdin: named, env });
+    assert.equal(JSON.parse(result.stdout).hookSpecificOutput.updatedInput.effort, "low", "the rewrite copies the named level");
+    const [record] = readLog(tempDir);
+    assert.equal(record.requested_effort, "low");
+    assert.deepEqual(record.effort, { proposed: null, reason: "requested" });
+  });
+  // With Jev off the table does not run, but the named level is still counted.
+  const tempDir = makeTempDir();
+  try {
+    await runNode(HOOK, { stdin: named, env: cleanEnv(tempDir, { ORCH_JEV_ENABLED: "0" }) });
+    const [record] = readLog(tempDir);
+    assert.equal(record.reason, "jev_disabled");
+    assert.equal(record.requested_effort, "low");
+    assert.equal(record.effort, undefined);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("the hook passes the keep line and the agent type to the effort table", async () => {
+  const body = jevBody({ kind: "implement", difficulty: 2, selfContained: 0.1 });
+  await withJev({ body }, async ({ tempDir, env }) => {
+    const keep = agentCall({
+      tool_input: { description: "Add retry", prompt: "Goal: add a retry.\norch-route: keep", subagent_type: "subagent-router:implementer" }
+    });
+    await runNode(HOOK, { stdin: keep, env });
+    assert.deepEqual(readLog(tempDir)[0].effort, { proposed: null, reason: "keep_requested" });
+  });
+  await withJev({ body }, async ({ tempDir, env }) => {
+    const fork = agentCall({ tool_input: { description: "Add retry", prompt: "Goal: add a retry.", subagent_type: "fork" } });
+    await runNode(HOOK, { stdin: fork, env });
+    assert.deepEqual(readLog(tempDir)[0].effort, { proposed: null, reason: "fork" });
+  });
+  // The table names no worker for a design task, so the requested agent type counts.
+  await withJev({ body: jevBody({ kind: "design", difficulty: 2 }) }, async ({ tempDir, env }) => {
+    await runNode(HOOK, { stdin: agentCall(), env });
+    const [record] = readLog(tempDir);
+    assert.equal(record.route.agent, null);
+    assert.deepEqual(record.effort, { proposed: "high", reason: "difficulty_2", worker_default: "high" });
+  });
+});
+
+test("in shadow mode the effort table judges the worker that really runs", async () => {
+  // The route would move this task to the debugger, whose file says medium. In
+  // shadow mode the requested implementer runs, and its file says high.
+  await withJev({ body: jevBody({ kind: "debug", difficulty: 1, writes: 0.1 }) }, async ({ tempDir, env }) => {
+    await runNode(HOOK, { stdin: agentCall(), env: { ...env, ORCH_MODE: "shadow" } });
+    const [record] = readLog(tempDir);
+    assert.equal(record.route.agent, "subagent-router:debugger");
+    assert.deepEqual(record.effort, { proposed: "medium", reason: "difficulty_1", worker_default: "high" });
+  });
+  // A route to Codex is only a proposal too, so the Claude worker still gets a level.
+  await withJev({ body: jevBody({ kind: "implement", difficulty: 2, selfContained: 0.95 }) }, async ({ tempDir, env }) => {
+    await runNode(HOOK, { stdin: agentCall(), env: { ...env, ORCH_MODE: "shadow" } });
+    const [record] = readLog(tempDir);
+    assert.equal(record.route.agent, "subagent-router:codex-implementer");
+    assert.equal(record.effort.proposed, "high");
+  });
+});
+
+test("a task that the table sends to Codex gets no proposed level", async () => {
+  await withJev({ body: jevBody({ kind: "implement", difficulty: 2, selfContained: 0.95 }) }, async ({ tempDir, env }) => {
+    await runNode(HOOK, { stdin: agentCall(), env });
+    const [record] = readLog(tempDir);
+    assert.equal(record.route.agent, "subagent-router:codex-implementer");
+    assert.deepEqual(record.effort, { proposed: null, reason: "codex_worker" });
+  });
+});
+
+test("effortRule off leaves no effort record", async () => {
+  await withJev({ body: jevBody({ kind: "implement", difficulty: 2, selfContained: 0.1 }) }, async ({ tempDir, env }) => {
+    await runNode(HOOK, { stdin: agentCall(), env: { ...env, ORCH_EFFORT_RULE: "off" } });
+    const [record] = readLog(tempDir);
+    assert.equal(record.effort, undefined);
+    assert.equal(record.final.model, "opus", "the switch changes nothing else");
+  });
+});

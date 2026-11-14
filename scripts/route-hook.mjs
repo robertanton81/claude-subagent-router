@@ -18,10 +18,11 @@ import { fileURLToPath } from "node:url";
 import { CODEX_JOB_KIND, DEFAULT_MODEL, FIXED_MODEL_AGENTS, REDIRECTS, WORKER_SET, WRITER_FAMILY, loadConfig } from "./lib/config.mjs";
 import { existingRequestId, workerPrompt, writeRequest } from "./lib/codex-request.mjs";
 import { lastWriterFamily, recordWriterDispatch } from "./lib/context.mjs";
+import { FABLE_MIN_VERSION, claudeCodeVersion, reserveFableLaunch, versionAtLeast } from "./lib/fable-gate.mjs";
 import { appendLog, registerSecret, registeredSecrets, truncate } from "./lib/log.mjs";
 import { CLAUDE_FALLBACK, claudeCapNotice, claudeNotice, claudeState, codexNotice, codexState, firstNotice } from "./lib/provider-state.mjs";
 import { readRouteLine } from "./lib/route-line.mjs";
-import { completenessShadow, decideModel, decideRoute, writerLockApplies } from "./lib/routing-table.mjs";
+import { completenessShadow, decideModel, decideRoute, fableCandidate, proposeEffort, writerLockApplies } from "./lib/routing-table.mjs";
 import { redactSecrets } from "./lib/secret-patterns.mjs";
 import { askJev, findApiKey } from "./lib/typesafe.mjs";
 import {
@@ -185,6 +186,19 @@ async function decide(input, toolInput, requested, config, record, providers) {
   if (wouldChange) {
     record.would_route = wouldChange;
   }
+  // The effort table, while it only watches. The level goes to the log and nowhere
+  // else: emit() writes an effort only for the Fable route, so this cannot change a
+  // call. The level is for the worker that will really run: in shadow mode the route
+  // is only a proposal.
+  const effort = proposeEffort(
+    jev.answers,
+    config.mode === "enforce" ? (route.agent ?? requested.agent) : requested.agent,
+    { requestedEffort: toolInput.effort, keep: routeLine.keep },
+    config
+  );
+  if (effort) {
+    record.effort = effort;
+  }
 
   if (!route.model) {
     return unchanged("pass", route.reason);
@@ -202,6 +216,53 @@ async function decide(input, toolInput, requested, config, record, providers) {
     return unchanged("shadow", route.reason);
   }
   return { action: "rewrite", reason: route.reason, final: { agent: route.agent, model: route.model } };
+}
+
+// The Fable route. The table named Opus for a debugging task or a hard
+// implementation, and the user turned the route on. The call moves to Fable only
+// when the gate says yes to both of its questions: this Claude Code resolves
+// `fable` to Fable 5.2, and the launch limit of the last 7 days has room. Every
+// other answer leaves the task on Opus, and `record.fable` says why.
+//
+// It runs after the writer check, so a denied call reserves no launch. It acts
+// only on a route that this hook is about to apply: nothing is reserved in shadow
+// mode, for a brief with `orch-route: keep`, or for a fallback from Codex. When a
+// later step of the hook fails, the call runs as written and the launch stays
+// counted. So the count can be too high, never too low.
+//
+// The effort is part of the route, because the level in a worker file was chosen
+// for Opus or Sonnet. A level that the call itself names stands.
+function applyFableRoute(input, toolInput, requested, decision, config, record) {
+  if (!record.route || !fableCandidate(record.route, config)) {
+    return;
+  }
+  const applied = (decision.action === "rewrite" || decision.action === "agree") && decision.reason === record.route.reason;
+  if (config.mode !== "enforce" || !applied) {
+    record.fable = { used: false, reason: config.mode !== "enforce" ? "shadow" : decision.reason };
+    return;
+  }
+  const version = claudeCodeVersion(input.transcript_path);
+  if (!versionAtLeast(version, FABLE_MIN_VERSION)) {
+    record.fable = { used: false, reason: version ? "version_old" : "version_unknown", version };
+    return;
+  }
+  const slot = reserveFableLaunch({ limit: config.fableWeeklyLaunches, sessionId: input.session_id ?? null, toolUseId: input.tool_use_id ?? null });
+  if (!slot.ok) {
+    record.fable = { used: false, reason: slot.reason, count: slot.count ?? null, limit: slot.limit };
+    return;
+  }
+  const final = { agent: decision.final.agent, model: "fable" };
+  if (typeof toolInput.effort !== "string") {
+    final.effort = config.fableEffort;
+  }
+  record.fable = { used: true, count: slot.count, limit: slot.limit, effort: final.effort ?? null, version };
+  const unchanged = final.agent === requested.agent && requested.model === "fable" && !final.effort;
+  decision.action = unchanged ? "agree" : "rewrite";
+  decision.reason = `fable_${record.route.reason}`;
+  decision.final = final;
+  record.action = decision.action;
+  record.reason = decision.reason;
+  record.final = decision.final;
 }
 
 // Stores the task of a Codex worker in a request file. Returns the new prompt
@@ -255,7 +316,13 @@ function prepareCodexTransport(input, toolInput, requested, decision, record) {
 function emit(toolInput, requested, final, newPrompt, decision, systemMessage) {
   // updatedInput replaces the whole input object, so start from a full copy.
   const updatedInput = { ...toolInput };
-  const routed = final.agent !== requested.agent || (final.model && final.model !== requested.model);
+  // The effort is written only for a route that carries one, and never over a
+  // level that the call names.
+  const setsEffort = Boolean(final.effort) && typeof toolInput.effort !== "string";
+  const routed = final.agent !== requested.agent || (final.model && final.model !== requested.model) || setsEffort;
+  if (setsEffort) {
+    updatedInput.effort = final.effort;
+  }
   if (final.agent !== requested.agent) {
     updatedInput.subagent_type = final.agent;
   }
@@ -276,10 +343,11 @@ function emit(toolInput, requested, final, newPrompt, decision, systemMessage) {
   // leaving it out keeps the normal permission checks of the user in place.
   const hookSpecificOutput = { hookEventName: "PreToolUse", updatedInput };
   if (routed) {
+    const model = setsEffort ? `${final.model} at the effort ${final.effort}` : final.model;
     hookSpecificOutput.additionalContext =
       final.agent === requested.agent
-        ? `The subagent-router routing hook set the model ${final.model} for this task and kept the agent type. Reason: ${decision.reason}.`
-        : `The subagent-router routing hook ran this task on ${final.agent} with the model ${final.model}. Reason: ${decision.reason}.`;
+        ? `The subagent-router routing hook set the model ${model} for this task and kept the agent type. Reason: ${decision.reason}.`
+        : `The subagent-router routing hook ran this task on ${final.agent} with the model ${model}. Reason: ${decision.reason}.`;
   }
   // systemMessage is the field that Claude Code shows to the user.
   process.stdout.write(JSON.stringify(systemMessage ? { systemMessage, hookSpecificOutput } : { hookSpecificOutput }));
@@ -316,6 +384,11 @@ async function main() {
     description: toolInput.description ?? null,
     prompt: truncate(toolInput.prompt ?? null, config.promptLogChars)
   };
+  // The level that the main session named, also when Jev is off, so the log shows
+  // how often it names one. The call keeps it: the hook copies the whole input.
+  if (typeof toolInput.effort === "string") {
+    record.requested_effort = toolInput.effort;
+  }
   if (warnings.length > 0) {
     record.config_warnings = warnings;
   }
@@ -357,6 +430,8 @@ async function main() {
     appendLog(record);
     return;
   }
+
+  applyFableRoute(input, toolInput, requested, decision, config, record);
 
   let systemMessage = null;
   if (config.mode === "enforce") {

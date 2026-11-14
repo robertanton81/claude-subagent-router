@@ -484,3 +484,27 @@ test("the triage summary obeys the report's project and date filters", () => {
   );
   assert.equal(report.triage.reports, 1);
 });
+
+test("the report counts named levels and what the effort table would propose", () => {
+  const base = { event: "dispatch", session_id: "s", cwd: "/work/p", mode: "enforce", action: "agree", reason: "implement", requested: { agent: "x", model: null }, final: { agent: "x", model: null } };
+  const row = (id, extra) => ({ ...base, ts: `2026-11-03T10:0${id}:00.000Z`, tool_use_id: String(id), ...extra });
+  const report = buildReport({
+    dataDir: "/tmp/none",
+    log: [
+      row(0, { effort: { proposed: "low", reason: "difficulty_0", worker_default: "high" } }),
+      row(1, { effort: { proposed: "high", reason: "difficulty_2", worker_default: "high" } }),
+      row(2, { effort: { proposed: "high", reason: "difficulty_2", worker_default: "medium" } }),
+      row(3, { effort: { proposed: "medium", reason: "difficulty_1", worker_default: null } }),
+      row(4, { requested_effort: "xhigh", effort: { proposed: null, reason: "requested" } }),
+      row(5, {})
+    ],
+    limits: [],
+    files: []
+  });
+  const effort = report.dispatches.effort;
+  assert.deepEqual(effort.named, { xhigh: 1 });
+  assert.deepEqual(effort.proposed, { low: 1, high: 2, medium: 1 });
+  assert.deepEqual(effort.noProposal, { requested: 1 });
+  assert.deepEqual(effort.againstWorkerFile, { lower: 1, same: 1, higher: 1, unknown: 1 });
+  assert.match(renderText(report), /The effort table only watches, and would propose: .*high 2/);
+});

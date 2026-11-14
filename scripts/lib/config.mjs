@@ -46,15 +46,15 @@ export const DEFAULT_MODEL = table({
 
 // The effort each worker runs at, from the `effort:` line of its agent file.
 // Without that line a worker inherits the session's effort, so a session at
-// `max` would run every worker at `max`. Each value is the default of the
-// worker's own model: Sonnet 5 `high`, Opus 5.5 `medium`. The one exception
-// is the complete searcher: Sonnet at `low`, because a complete listing needs a
-// careful reader more than long thinking. Haiku 4.5 takes no effort, so the Haiku workers
-// have no line (null). The line stays when the hook
+// `max` would run every worker at `max`. The implementer and the reviewer run at
+// `high`, one level above the `medium` default of Sonnet 5.5, and the debugger at
+// the default of Opus 5.5. The complete searcher runs Sonnet at `low`, because a
+// complete listing needs a careful reader more than long thinking. The Haiku workers
+// have no line (null), although Haiku 5.5 takes effort. The line stays when the hook
 // changes the model: an implementer moved to Opus runs at `high`, a debugger
 // capped at Sonnet runs at `medium`. The variable CLAUDE_CODE_EFFORT_LEVEL
 // overrides the line. Source: https://code.claude.com/docs/en/model-config,
-// checked 2026-09-23. Keep this in sync with the agent files.
+// checked 2026-11-03. Keep this in sync with the agent files.
 export const DEFAULT_EFFORT = table({
   [WORKERS.searcher]: null,
   [WORKERS.completeSearcher]: "low",
@@ -94,6 +94,12 @@ const MODES = new Set(["enforce", "shadow", "off"]);
 // whose routing is already in force. "shadow" changes no route and records what
 // it would have changed, "enforce" changes the route, "off" does neither.
 const COMPLETE_RULES = new Set(["shadow", "enforce", "off"]);
+// The effort table only watches for now: "shadow" records the level that it would
+// give a call, "off" does not. There is no "enforce" until real runs have judged it.
+const EFFORT_RULES = new Set(["shadow", "off"]);
+// The levels that the Fable route may run at. The table stops at "high", as the
+// effort table does.
+const FABLE_EFFORTS = new Set(["low", "medium", "high"]);
 // "annotate" is phase 2 of the triage and is not built yet.
 const TRIAGE_MODES = new Set(["off", "log"]);
 
@@ -113,6 +119,20 @@ export const DEFAULTS = Object.freeze({
   // New on 2026-09-22 and in "shadow" until the log says what it would do.
   completeRule: "shadow",
   completeGate: 0.6,
+  effortRule: "shadow",
+  // The automatic Fable route is opt-in. Fable has its own weekly limit on a
+  // subscription, and use beyond that limit costs usage credits, which a subagent
+  // spends without asking. So while this is false, no route names Fable.
+  fableRoute: false,
+  // The largest number of Fable launches by this route in any 7 days. This is a
+  // launch limit, not a money limit: Claude Code gives a plugin no reading of the
+  // Fable limit, and one launch can use few or many tokens. 0 stops the route.
+  // The default is small on purpose: nobody can know in advance how much of the
+  // Fable limit one launch uses, so a user raises it after seeing that.
+  fableWeeklyLaunches: 5,
+  // The effort of a call that the route moves to Fable, unless the call names one.
+  // The levels in the worker files were chosen for Opus and Sonnet.
+  fableEffort: "medium",
   limitsMaxAgeMs: 10 * 60 * 1000,
   // The classifier is opt-in, like Codex. While this is false, the hook sends no
   // brief to TypeSafe and does not even look for a key, so a key that exists on
@@ -319,6 +339,10 @@ export const CONFIG_SPEC = Object.freeze({
   limitGate: { kind: "number", min: 0, max: 100, about: "the percentage of a usage window from which the table prefers Codex" },
   completeRule: { kind: "choice", values: [...COMPLETE_RULES], about: "what to do with a search that is only answered correctly by a complete list" },
   completeGate: { kind: "number", min: 0, max: 1, about: "how sure the classifier must be that an answer needs every match" },
+  effortRule: { kind: "choice", values: [...EFFORT_RULES], about: "whether the log records the effort level that the hook would give each call; no call changes" },
+  fableRoute: { kind: "flag", about: "let the hook move a debugging task or a hard implementation from Opus to Fable 5.2; Fable use beyond its weekly limit costs usage credits, and a subagent spends them without asking" },
+  fableWeeklyLaunches: { kind: "number", min: 0, max: 500, about: "the largest number of Fable launches by that route in any 7 days, a whole number; it limits launches, not tokens or money, and 0 stops the route" },
+  fableEffort: { kind: "choice", values: [...FABLE_EFFORTS], about: "the effort of a call that the route moves to Fable, unless the call names a level" },
   pacing: { kind: "flag", about: "also count a window as full when the usage so far is on pace to reach 100 percent before the reset" },
   paceAfter: { kind: "number", min: 0, max: 1, about: "how much of a window must pass before the pace rule counts" },
   limitsMaxAgeMs: { kind: "number", min: 0, max: 24 * 3600 * 1000, about: "how long a usage sample stays usable, in milliseconds" },
@@ -469,6 +493,11 @@ export function loadConfig(env = process.env) {
     limitGate: numberInRange("limitGate", merged.limitGate, DEFAULTS.limitGate, 0, 100, warnings),
     completeRule: oneOf("completeRule", env.ORCH_COMPLETE_RULE ?? merged.completeRule, COMPLETE_RULES, DEFAULTS.completeRule, warnings),
     completeGate: numberInRange("completeGate", merged.completeGate, DEFAULTS.completeGate, 0, 1, warnings),
+    effortRule: oneOf("effortRule", env.ORCH_EFFORT_RULE ?? merged.effortRule, EFFORT_RULES, DEFAULTS.effortRule, warnings),
+    fableRoute: envFlag("ORCH_FABLE_ROUTE", env.ORCH_FABLE_ROUTE, flag("fableRoute", merged.fableRoute, false, warnings), warnings),
+    // A fraction is rounded down, so the limit is never higher than the number written.
+    fableWeeklyLaunches: Math.floor(numberInRange("fableWeeklyLaunches", merged.fableWeeklyLaunches, DEFAULTS.fableWeeklyLaunches, 0, 500, warnings)),
+    fableEffort: oneOf("fableEffort", merged.fableEffort, FABLE_EFFORTS, DEFAULTS.fableEffort, warnings),
     pacing: flag("pacing", merged.pacing, DEFAULTS.pacing, warnings),
     paceAfter: numberInRange("paceAfter", merged.paceAfter, DEFAULTS.paceAfter, 0, 1, warnings),
     limitsMaxAgeMs: numberInRange("limitsMaxAgeMs", merged.limitsMaxAgeMs, DEFAULTS.limitsMaxAgeMs, 0, 24 * 3600 * 1000, warnings),

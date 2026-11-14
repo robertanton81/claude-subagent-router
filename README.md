@@ -11,9 +11,11 @@ See [What leaves your machine](#what-leaves-your-machine) before you turn either
 
 ## Why
 
-Your Claude plan counts usage in two windows, periods that start again when they reset: a 5-hour window and a weekly window. Without routing, a subagent often runs on the same large model as the main session, even for a simple file search. That uses up both windows faster than needed. With routing on, the plugin picks Haiku for a search, Sonnet for most edits and reviews, and Opus for hard work. With Jev and Codex on, a hard implementation can go to Codex when its brief is self-contained: the brief holds everything that the task needs. So your ChatGPT plan takes part of the work.
+- **The right model for each task.** Without routing, a subagent often runs on the main session's large model, even for a search. The plugin picks Haiku for a search, Sonnet for most edits and reviews, and Opus for hard work. With Jev and Codex on, a hard task with a self-contained brief (it holds everything the task needs) can go to Codex on your ChatGPT plan.
+- **Better output from each worker.** The debugger reproduces a failure before it names a cause. The implementer shows evidence for each "done". The review skill checks rules, spec and bugs separately.
+- **A second opinion before a decision.** [`consult`](guide/codex.md#ask-codex-a-question) asks Codex a design question, read-only.
 
-The plugin calls no Claude or OpenAI API, so the work stays inside your plans; the one paid API is Jev. Whether the routing saves money on your work is not proven yet; the [offline evaluation](EVALUATION.md) measures it.
+This saves your Claude plan's usage limits. The plugin calls no Claude or OpenAI API; the one paid API is Jev. The savings are not proven yet; the [offline evaluation](EVALUATION.md) measures them.
 
 ## Requirements
 
@@ -113,7 +115,7 @@ Every limit, with details, is in [Known limits](guide/known-limits.md).
 
 ## Documentation
 
-[Setup](guide/setup.md) · [Configuration](guide/configuration.md) · [What leaves your machine](guide/privacy.md) · [How the routing works](guide/routing.md) · [When a plan is near its limit](guide/usage-limits.md) · [The writer lock](guide/writer-lock.md) · [Codex](guide/codex.md) · [TypeSafe and Jev](guide/jev.md) · [The report and the log](guide/report-and-log.md) · [The review skill](guide/review.md) · [Finding triage](guide/finding-triage.md) (experimental, off by default) · [Known limits](guide/known-limits.md) · [Offline evaluation](EVALUATION.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md) · [Build notes](HOW-THIS-WAS-BUILT.md)
+[Setup](guide/setup.md) · [Configuration](guide/configuration.md) · [What leaves your machine](guide/privacy.md) · [How the routing works](guide/routing.md) · [When a plan is near its limit](guide/usage-limits.md) · [The writer lock](guide/writer-lock.md) · [Codex](guide/codex.md) · [TypeSafe and Jev](guide/jev.md) · [The report and the log](guide/report-and-log.md) · [The review skill](guide/review.md) · [Finding triage](guide/finding-triage.md) (experimental, default off) · [Known limits](guide/known-limits.md) · [Offline evaluation](EVALUATION.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md) · [Build notes](HOW-THIS-WAS-BUILT.md)
 
 ## Develop the plugin
 

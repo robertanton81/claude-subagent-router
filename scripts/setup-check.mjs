@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import { FIXED_MODEL_AGENTS, dataDir, loadConfig } from "./lib/config.mjs";
 import { limitsFile, readLimitsState } from "./lib/context.mjs";
+import { FABLE_MIN_VERSION, fableLaunchCount, fableLedgerFile, fableStaleLock } from "./lib/fable-gate.mjs";
 import { logFile, readLogTail } from "./lib/log.mjs";
 import { broadEntries, copyProtection, deadVariableEntries, effectiveSandboxEnabled, managedDropIns, sandboxRows, workerCoverage } from "./lib/protected-copy.mjs";
 import { codexPlatformSupported, codexState, describeTime } from "./lib/provider-state.mjs";
@@ -204,6 +205,26 @@ row(
     : config.completeRule === "enforce"
       ? `in force at gate ${config.completeGate}: a search whose answer needs every match keeps sonnet`
       : "off: the rule neither changes a route nor records one"
+);
+row(
+  "OK",
+  "Effort table",
+  config.effortRule === "shadow"
+    ? `watching only: no call changes, and the log records the level that it would give. Read it with "node scripts/orch-report.mjs"`
+    : "off: it records no level"
+);
+const fableCount = fableLaunchCount();
+const fableLock = fableStaleLock();
+row(
+  config.fableRoute && (fableCount === null || fableLock) ? "WARN" : "OK",
+  "Fable route",
+  !config.fableRoute
+    ? "off: no route names Fable. Turn it on with fableRoute; Fable use beyond its weekly limit costs usage credits"
+    : fableCount === null
+      ? `on, but the launch record cannot be read, so every task stays on Opus. Repair the file, or remove it: removing it starts the count of the last 7 days at zero. File: ${fableLedgerFile()}`
+      : fableLock
+        ? `on, but an old lock file blocks the launch record, so every task stays on Opus. A hook that was stopped most likely left it, but its age alone does not prove that. First make sure that no Claude Code session is starting an agent right now, then remove it: ${fableLock}`
+        : `on: a debugging task or a hard implementation can move from Opus to Fable at the effort ${config.fableEffort}, in sessions on Claude Code ${FABLE_MIN_VERSION} or later. ${fableCount} of ${config.fableWeeklyLaunches} launches used in the last 7 days. This limits launches, not tokens or money`
 );
 row(
   "OK",

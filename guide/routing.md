@@ -114,11 +114,38 @@ A direct call to `implementer`, `debugger` or `reviewer` gets no such rule. So w
 Effort is how much the model thinks before it answers.
 
 - Each Claude worker sets its effort in its agent file. So the effort of your session does not carry over to the workers.
-- Most workers use the default of their model: Sonnet 5 `high`, Opus 5.5 `medium`. The complete searcher is the exception: it runs Sonnet at `low`.
-- Haiku 4.5 takes no effort setting.
+- The implementer and the reviewer run at `high`, the debugger at `medium` and the complete searcher at `low`. The default of Opus 5.5, Sonnet 5.5 and Haiku 5.5 is `medium`.
+- The searcher sets no effort. On Claude Code 2.1.317 or later, when it runs on a different model from the session, it uses that model's saved level or its default. Otherwise it takes the session's level.
 - The level stays when the hook changes the model. An implementer moved to Opus runs at `high`.
 - The variable `CLAUDE_CODE_EFFORT_LEVEL` overrides the level.
 - The Codex workers use the model and effort of `~/.codex/config.toml`, unless the brief has a `codex-model:` or `codex-effort:` line.
+
+A call can also name its own level: Claude Code 2.1.292 added an `effort` parameter to the Agent tool, which overrides the agent file. The hook leaves a named level as it is.
+
+The hook sets a level in one case only, [the Fable route](#the-fable-route). Apart from that, its effort table only watches when Jev is on: it records in the log the level that it would give the call, from Jev's kind and difficulty, and `node scripts/orch-report.mjs` counts them. It makes no proposal for a call that names a level, for a Codex worker, for a fork, or when Jev is not sure. Agents that the Workflow tool starts never reach it. Set `effortRule` to `off` to stop the records.
+
+## The Fable route
+
+Fable 5.2 is Anthropic's largest model. The route is off by default. With `fableRoute` on, the hook can move a task from Opus to Fable when the table picked Opus for it: a debugging task, or a hard implementation.
+
+Read the cost before you turn it on:
+
+- On a subscription, Fable has its own weekly limit. Use beyond that limit costs usage credits, which are real money. A subagent spends them without asking you.
+- Claude Code gives a plugin no reading of the Fable limit. So the plugin cannot see how much is left.
+- The plugin's own bound is a launch limit, `fableWeeklyLaunches`: at most that many Fable launches by this route in any 7 days. It is not a token limit and not a money limit. One launch can be small or large.
+
+A task moves to Fable only when all of this holds. Otherwise it stays on Opus, and the log field `fable` says why.
+
+- The mode is `enforce`, and the brief has no `orch-route: keep` line.
+- The table picked Opus. A task that the limit rule capped at Sonnet or moved to Codex is not moved.
+- The session runs on Claude Code 2.1.321 or later. Before that version the name `fable` means Fable 5.1, which costs more. The hook reads the version from the session's transcript file. When it cannot read it, the task stays on Opus.
+- The last 7 days hold fewer launches than the limit. The hook checks and records the launch in one locked step, in the file `fable-launches.json` of the data folder. When that file is damaged, or an old lock file lies next to it, the task stays on Opus, and `node scripts/setup-check.mjs` names the file. Remove an old lock file only while no Claude Code session is starting an agent.
+
+The routed call runs at the effort `fableEffort`, because the levels in the worker files were chosen for Opus and Sonnet. A level that the call names stays.
+
+What the launch limit cannot hold against: removing `fable-launches.json` starts a new count, and a system clock that jumps forward ends the 7 days early. A launch also stays counted when the hook fails after it recorded it, so the count can be too high.
+
+Not counted, because the hook does not route them: a brief with `orch-route: keep`, a call from inside a subagent, an agent that the Workflow tool starts, your own Fable sessions, and other machines.
 
 ## Safety rules
 

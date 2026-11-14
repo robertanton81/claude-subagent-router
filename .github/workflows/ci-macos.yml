@@ -1,0 +1,77 @@
+name: CI macOS
+
+# In a private repository ci.yml runs Linux only, because a macOS minute costs
+# about ten Linux minutes. This workflow runs the macOS tests on one Node version
+# when the macOS-specific code, what it runs, its tests or the CI files change,
+# once a week, and on a manual start. The weekly run also covers the other files
+# that call the macOS code. In a public repository ci.yml already runs macOS on
+# every Node version, so there this job runs only on the weekly or manual start.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # The Seatbelt profile, the no-links open and the executable grade.
+      - 'scripts/lib/execution-boundary.mjs'
+      - 'scripts/lib/open-no-links.mjs'
+      - 'scripts/lib/executable-grade.mjs'
+      # What those run or import: the worker inside the boundary, the eval
+      # runner and the test helpers (a TMPDIR bug there showed only on macOS).
+      - 'scripts/snapshot-worker.mjs'
+      - 'scripts/lib/eval.mjs'
+      - 'tests/helpers.mjs'
+      # Other code that differs on macOS: the ps output of the writer lock,
+      # and the --brief open and stdin read of the Codex command.
+      - 'scripts/lib/writer-lock.mjs'
+      - 'scripts/orch-codex.mjs'
+      - 'tests/orch-codex.test.mjs'
+      - 'tests/executable-grade.test.mjs'
+      - 'tests/open-no-links.test.mjs'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/ci-macos.yml'
+  pull_request:
+    paths:
+      # The Seatbelt profile, the no-links open and the executable grade.
+      - 'scripts/lib/execution-boundary.mjs'
+      - 'scripts/lib/open-no-links.mjs'
+      - 'scripts/lib/executable-grade.mjs'
+      # What those run or import: the worker inside the boundary, the eval
+      # runner and the test helpers (a TMPDIR bug there showed only on macOS).
+      - 'scripts/snapshot-worker.mjs'
+      - 'scripts/lib/eval.mjs'
+      - 'tests/helpers.mjs'
+      # Other code that differs on macOS: the ps output of the writer lock,
+      # and the --brief open and stdin read of the Codex command.
+      - 'scripts/lib/writer-lock.mjs'
+      - 'scripts/orch-codex.mjs'
+      - 'tests/orch-codex.test.mjs'
+      - 'tests/executable-grade.test.mjs'
+      - 'tests/open-no-links.test.mjs'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/ci-macos.yml'
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    # Scheduled and manual runs go ahead in a private and in a public repository.
+    # Push and pull request runs go ahead only in a private one.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event.repository.private
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm run test:boundaries
+      - run: npm run check
+      - run: npm test

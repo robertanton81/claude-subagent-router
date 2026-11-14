@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+Routing:
+
+- **A Fable 5.2 route, off by default.** With `fableRoute` on, the hook can move a debugging task or a hard implementation from Opus to Fable 5.2, at the effort `fableEffort`. At most `fableWeeklyLaunches` launches in any 7 days take this route, 5 by default. This is a launch limit, not a money limit: Fable use beyond its weekly limit costs usage credits. The route needs Claude Code 2.1.321 or later. See `guide/routing.md`, "The Fable route".
+- **The hook logs the effort level that it would give each call.** It changes no call. The setting `effortRule` turns the record off. See `guide/routing.md`, "Effort".
+
 ## 0.4.6
 
 Privacy:

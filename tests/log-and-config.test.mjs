@@ -64,6 +64,12 @@ test("loadConfig merges the file and the environment, and reports bad values", (
     const badRule = loadConfig({ ...env, ORCH_COMPLETE_RULE: "yes please" });
     assert.equal(badRule.config.completeRule, "shadow");
     assert.match(badRule.warnings.join("\n"), /completeRule must be one of shadow, enforce, off/);
+    // The effort table has no way to change a call, and a bad value must keep it that way.
+    assert.equal(fromFile.config.effortRule, "shadow");
+    assert.equal(loadConfig({ ...env, ORCH_EFFORT_RULE: "off" }).config.effortRule, "off");
+    const badEffort = loadConfig({ ...env, ORCH_EFFORT_RULE: "enforce" });
+    assert.equal(badEffort.config.effortRule, "shadow");
+    assert.match(badEffort.warnings.join("\n"), /effortRule must be one of shadow, off/);
 
     // A file that cannot be used must never lead to the mode that rewrites calls.
     fs.writeFileSync(path.join(dataDir, "config.json"), '{"mode": "shadow", "kindGate": 0.7,}');

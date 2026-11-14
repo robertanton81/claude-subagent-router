@@ -16,6 +16,34 @@ import { describeTime } from "../scripts/lib/provider-state.mjs";
 import { acquireWriterLock, jobsDir, writerLockPath } from "../scripts/lib/writer-lock.mjs";
 import { cleanEnv, makeTempDir, ROOT, runNode } from "./helpers.mjs";
 
+// Reads a pid file of a job once the pid is in it. The starter returns after
+// its --wait time, and on a busy machine the detached runner has not started
+// Codex by then, so codex.pid does not exist yet. Reading it at once made these
+// tests fail now and then with ENOENT. A file that never gets a pid fails the
+// test with a message that names the file.
+async function pidWhenWritten(jobDir, name, ms = 15000) {
+  const file = path.join(jobDir, name);
+  const until = Date.now() + ms;
+  for (;;) {
+    let text = "";
+    try {
+      text = fs.readFileSync(file, "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    const pid = Number(text);
+    if (text.trim() !== "" && Number.isInteger(pid) && pid > 0) {
+      return pid;
+    }
+    if (Date.now() >= until) {
+      assert.fail(`${name} of the job held no pid after ${ms} ms: ${file}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 const CLI = "scripts/orch-codex.mjs";
 
 // A stand-in for the `codex` command. It records what it received.
@@ -336,7 +364,7 @@ test("a cancel whose ps cannot answer stops nothing, keeps the lock and says so"
     const id = jobIdOf(first.stdout);
     assert.ok(id, first.stdout);
     const dir = path.join(tempDir, "data", "codex-jobs", id);
-    const pids = ["runner.pid", "codex.pid"].map((name) => Number(fs.readFileSync(path.join(dir, name), "utf8")));
+    const pids = [await pidWhenWritten(dir, "runner.pid"), await pidWhenWritten(dir, "codex.pid")];
 
     // A ps that cannot look at processes, as in a sandbox or under a process limit.
     const bin = path.join(tempDir, "bin");
@@ -423,8 +451,8 @@ test("a runner that died without a result is reported, not waited for", async ()
     const first = await runNode(CLI, { args: ["implement", "--wait", "0.5"], stdin: "Goal: long", env, cwd: tempDir });
     const id = jobIdOf(first.stdout);
     const jobDir = path.join(tempDir, "data", "codex-jobs", id);
-    const runnerPid = Number(fs.readFileSync(path.join(jobDir, "runner.pid"), "utf8"));
-    const codexPid = Number(fs.readFileSync(path.join(jobDir, "codex.pid"), "utf8"));
+    const runnerPid = await pidWhenWritten(jobDir, "runner.pid");
+    const codexPid = await pidWhenWritten(jobDir, "codex.pid");
     process.kill(runnerPid, "SIGKILL");
     process.kill(codexPid, "SIGKILL");
 
@@ -859,7 +887,9 @@ test("when only the runner dies, the job stays active because Codex still writes
     const first = await runNode(CLI, { args: ["implement", "--wait", "0.5"], stdin: "Goal: long", env, cwd: tempDir });
     const id = jobIdOf(first.stdout);
     const jobDir = path.join(tempDir, "data", "codex-jobs", id);
-    process.kill(Number(fs.readFileSync(path.join(jobDir, "runner.pid"), "utf8")), "SIGKILL");
+    // The test is about a job whose Codex runs. So Codex must have started before the runner dies.
+    await pidWhenWritten(jobDir, "codex.pid");
+    process.kill(await pidWhenWritten(jobDir, "runner.pid"), "SIGKILL");
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     const waited = await runNode(CLI, { args: ["wait", id, "--wait", "1"], env, cwd: tempDir });

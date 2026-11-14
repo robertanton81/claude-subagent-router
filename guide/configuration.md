@@ -55,6 +55,15 @@ When the plugin reads the settings file, a value that is not valid falls back to
 | :-- | :-- | :-- |
 | `completeRule` | `shadow` | What to do with a search that is only answered correctly by a complete list: `shadow`, `enforce` or `off`. |
 | `completeGate` | `0.6` | How sure Jev must be that the answer needs every match before the rule counts, from 0 to 1. |
+| `effortRule` | `shadow` | Whether the log records the effort level that the hook would give each call: `shadow` or `off`. No call changes in either case; see [Effort](routing.md#effort). |
+
+## The Fable route
+
+| Key | Default | Meaning |
+| :-- | :-- | :-- |
+| `fableRoute` | `false` | Let the hook move a debugging task or a hard implementation from Opus to Fable 5.2. See [The Fable route](routing.md#the-fable-route) for the cost. The variable `ORCH_FABLE_ROUTE` sets it for one session. |
+| `fableWeeklyLaunches` | `5` | The largest number of Fable launches by that route in any 7 days, a whole number from 0 to 500. It limits launches, not tokens or money. `0` stops the route. Start small, and raise it after you have seen what the launches do to your Fable limit. |
+| `fableEffort` | `medium` | The effort of a call that the route moves to Fable: `low`, `medium` or `high`. A level that the call names stays. |
 
 The values of `completeRule`:
 
@@ -105,6 +114,7 @@ These variables override the settings file for a single session, for example `OR
 | `ORCH_JEV_ENABLED` | `1` or `0`. Turns Jev on or off, whatever the settings file says. |
 | `ORCH_ROUTE_OTHER_AGENTS` | `1` or `0`. Whether the hook sets the model of other agent types. |
 | `ORCH_COMPLETE_RULE` | `shadow`, `enforce` or `off` for the completeness rule. |
+| `ORCH_EFFORT_RULE` | `shadow` or `off` for the effort table. |
 | `ORCH_JEV_TIMEOUT_MS` | The classifier timeout, in milliseconds. |
 | `ORCH_TYPESAFE_URL` | Another classifier endpoint. |
 | `ORCH_DATA_DIR` | Another folder for the log, the settings file and the usage samples. The status line snippet still writes to `~/.claude/orchestrator/`. Change `ORCH_DIR` in your copy of the snippet too, or the limit rules find no sample. |

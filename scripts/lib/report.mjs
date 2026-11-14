@@ -98,6 +98,17 @@ export function codexFailureCode(result) {
   return "unknown";
 }
 
+// Where a proposed level stands against the level in the worker's file.
+const EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"];
+function compareEffort(proposed, workerDefault) {
+  const from = EFFORT_ORDER.indexOf(workerDefault);
+  const to = EFFORT_ORDER.indexOf(proposed);
+  if (from < 0 || to < 0) {
+    return "unknown";
+  }
+  return to < from ? "lower" : to > from ? "higher" : "same";
+}
+
 function count(map, key) {
   const name = key ?? "unknown";
   map[name] = (map[name] ?? 0) + 1;
@@ -252,6 +263,7 @@ export function buildReport(store, options = {}) {
   let denied = 0;
   let modelOnly = 0;
   let notices = 0;
+  const effort = { named: {}, proposed: {}, noProposal: {}, againstWorkerFile: { lower: 0, same: 0, higher: 0, unknown: 0 } };
   let ruleWouldFire = 0;
   const ruleWouldFireByReason = {};
   // Dispatches where the orchestrator named a model, and how often the hook ran
@@ -279,6 +291,18 @@ export function buildReport(store, options = {}) {
     }
     if (record.model_only === true) {
       modelOnly += 1;
+    }
+    // The effort table, which only watches, and the levels the main session named.
+    if (typeof record.requested_effort === "string") {
+      count(effort.named, record.requested_effort);
+    }
+    if (record.effort && typeof record.effort === "object") {
+      if (typeof record.effort.proposed === "string") {
+        count(effort.proposed, record.effort.proposed);
+        effort.againstWorkerFile[compareEffort(record.effort.proposed, record.effort.worker_default)] += 1;
+      } else {
+        count(effort.noProposal, record.effort.reason ?? "unknown");
+      }
     }
     // A rule that only watches. `would_route` is what it would have changed, so
     // these counts say what turning it on would cost before anyone turns it on.
@@ -611,6 +635,7 @@ export function buildReport(store, options = {}) {
       unchanged: { count: unchanged, byReason: unchangedByReason },
       denied,
       modelOnly,
+      effort,
       ruleWouldFire,
       ruleWouldFireByReason,
       explicitModel,
@@ -679,6 +704,8 @@ export function renderText(report) {
   lines.push(`  Unchanged: ${dispatches.unchanged.count}: ${pairs(dispatches.unchanged.byReason)}`);
   lines.push(`  Denied by the writer lock: ${dispatches.denied}. Model-only dispatches to other agent types: ${dispatches.modelOnly}`);
   lines.push(`  A rule that only watched would have changed: ${dispatches.ruleWouldFire} of ${dispatches.total}: ${pairs(dispatches.ruleWouldFireByReason)}`);
+  const levels = dispatches.effort;
+  lines.push(`  Effort named by the orchestrator: ${pairs(levels.named)}. The effort table only watches, and would propose: ${pairs(levels.proposed)}; no proposal: ${pairs(levels.noProposal)}. Against the worker's file: ${pairs(levels.againstWorkerFile)}`);
   const named = dispatches.explicitModel;
   lines.push(`  Model named by the orchestrator: ${named.named} dispatches, overridden ${named.overridden} (down ${named.down}, up ${named.up}): ${pairs(named.byChange)}. In shadow mode it would have overridden ${named.wouldOverride}. Moved to Codex ${named.toCodex}, from Codex ${named.fromCodex}, would have moved to Codex ${named.wouldMoveToCodex}`);
   lines.push(`  Notices shown: ${dispatches.notices.count}: ${pairs(dispatches.notices.byKind)}`);

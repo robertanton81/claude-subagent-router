@@ -8,14 +8,24 @@ on:
 permissions:
   contents: read
 
+# A newer commit on a pull request cancels the older run of that pull request.
+# Every push to main keeps its own run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # In a private repository a macOS minute costs about ten Linux minutes, so
+        # there this workflow runs Linux only, and ci-macos.yml runs macOS when the
+        # macOS code changes. A public repository runs both systems for free.
+        os: ${{ fromJSON(github.event.repository.private && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-latest"]') }}
         node: [20, 22, 24, 26]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

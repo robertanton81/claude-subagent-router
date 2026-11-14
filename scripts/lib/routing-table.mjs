@@ -1,4 +1,4 @@
-import { REVIEWER_SET, WORKERS, WORKER_SET, WRITER_FAMILY } from "./config.mjs";
+import { DEFAULT_EFFORT, REVIEWER_SET, WORKERS, WORKER_SET, WRITER_FAMILY } from "./config.mjs";
 
 // The routing table. This file is the part to tune when the log shows wrong routes.
 //
@@ -105,6 +105,61 @@ export function completenessShadow(answers, route, config) {
     : { model: "sonnet", reason: "needs_every_match" };
 }
 
+// The kinds that the effort table has a level for. "other" and any option that a
+// later Jev version may add get no proposal.
+const EFFORT_KINDS = new Set(["search", "mechanical_edit", "implement", "debug", "review", "design"]);
+
+// The effort level that the hook would give this call. It only watches: the hook
+// writes the answer to the log and never sends it to Claude Code. The levels are a
+// first guess, to be judged against real runs. Difficulty asks how hard a task is
+// for an engineer, not what effort a model needs, so a proposal is a hypothesis.
+//
+// A level that the main session named stands, so there is no proposal for it. A
+// Codex worker has none either: the `effort` of the call would reach only its small
+// Claude launcher, and Codex takes its own from a `codex-effort:` line. A fork
+// ignores the parameter. The level stops at "high", because the research of
+// 2026-09-23 found no gain above it for the kinds of work this plugin routes. Only
+// a search or a mechanical edit can go to "low", and not a search that must list
+// every match, because that is the case where less work lost an entry.
+export function proposeEffort(answers, target, call, config) {
+  if (config.effortRule !== "shadow") {
+    return null;
+  }
+  const none = (reason) => ({ proposed: null, reason });
+  if (call.requestedEffort) {
+    return none("requested");
+  }
+  if (call.keep) {
+    return none("keep_requested");
+  }
+  if (target === "fork") {
+    return none("fork");
+  }
+  if (target === WORKERS.codexImplementer || target === WORKERS.codexReviewer) {
+    return none("codex_worker");
+  }
+  if (answers.kindConfidence < config.kindGate) {
+    return none("low_confidence");
+  }
+  if (!EFFORT_KINDS.has(answers.kind)) {
+    return none(`kind_${answers.kind}`);
+  }
+  if (!atOrAbove(answers.difficultyConfidence, config.difficultyGate)) {
+    return none("difficulty_unknown");
+  }
+  const level = Math.round(answers.difficulty);
+  const byDifficulty = level < 1 ? "low" : level < 2 ? "medium" : "high";
+  const smallKind = answers.kind === "mechanical_edit" || (answers.kind === "search" && !needsEveryMatch(answers, config));
+  const proposed = byDifficulty === "low" && !smallKind ? "medium" : byDifficulty;
+  return {
+    proposed,
+    reason: proposed === byDifficulty ? `difficulty_${level}` : "floor_for_kind",
+    // What the worker's own file sets. Unknown for another owner's agent, whose
+    // file this hook does not read, and for a worker with no line.
+    worker_default: WORKER_SET.has(target) ? (DEFAULT_EFFORT[target] ?? null) : null
+  };
+}
+
 // The model for a task that runs on Claude, with the upper limit applied.
 function claudeModel(model, reason, facts) {
   return facts.capAtSonnet && model === "opus" ? { model: "sonnet", reason: "claude_tight" } : { model, reason };
@@ -113,6 +168,19 @@ function claudeModel(model, reason, facts) {
 function toClaude(agent, model, reason, facts) {
   const picked = claudeModel(model, reason, facts);
   return to(agent, picked.model, picked.reason);
+}
+
+// The routes that the Fable route may move from Opus to Fable: debugging, and a
+// hard implementation. "hard" is the model-only row for other agent types.
+const FABLE_REASONS = new Set(["debug", "hard", "hard_needs_context", "codex_tight"]);
+
+// Would the Fable route take this route? The table itself never names Fable: it
+// names Opus, and this answers whether the hook may ask the gate in
+// fable-gate.mjs for one launch. Because it reads the finished route, every limit
+// above still holds: a route that the limit rule capped at Sonnet, moved to Codex
+// or left alone is not Opus and so is no candidate.
+export function fableCandidate(route, config) {
+  return config.fableRoute === true && route?.model === "opus" && FABLE_REASONS.has(route.reason);
 }
 
 // The orchestrator sent the task to a Codex worker, and Codex can take it. The

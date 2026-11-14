@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { DEFAULTS, WORKERS } from "../scripts/lib/config.mjs";
-import { completenessShadow, decideModel, decideRoute } from "../scripts/lib/routing-table.mjs";
+import { completenessShadow, decideModel, decideRoute, proposeEffort } from "../scripts/lib/routing-table.mjs";
 
 const config = { ...DEFAULTS };
 // The table reads one boolean for Claude. claudeState() decides it, and its
@@ -307,4 +307,65 @@ test("on a Claude worker, both functions name the same model for the same answer
     }
   }
   assert.equal(compared, 840);
+});
+
+// The effort table. It only watches, so these tests pin what the log will say.
+const asPlainCall = { requestedEffort: undefined, keep: false };
+
+test("the effort table follows the difficulty and stops at high", () => {
+  const level = (difficulty) => {
+    const { proposed, reason } = proposeEffort(answers({ difficulty }), WORKERS.implementer, asPlainCall, config);
+    return [proposed, reason];
+  };
+  assert.deepEqual(level(1), ["medium", "difficulty_1"]);
+  assert.deepEqual(level(2), ["high", "difficulty_2"]);
+  assert.deepEqual(level(3), ["high", "difficulty_3"], "the table never proposes a level above high");
+  // The score lands between levels and is rounded, as in the routing table.
+  assert.deepEqual(level(0.5), ["medium", "difficulty_1"]);
+  assert.deepEqual(level(1.4), ["medium", "difficulty_1"]);
+  assert.deepEqual(level(1.5), ["high", "difficulty_2"]);
+});
+
+test("the gate value itself is confident enough for the effort table", () => {
+  const atGates = answers({ kindConfidence: config.kindGate, difficultyConfidence: config.difficultyGate });
+  assert.equal(proposeEffort(atGates, WORKERS.implementer, asPlainCall, config).proposed, "medium");
+});
+
+test("only a search or a mechanical edit can get the low level", () => {
+  const easy = (kind, extra = {}) => proposeEffort(answers({ kind, difficulty: 0, ...extra }), WORKERS.implementer, asPlainCall, config);
+  assert.deepEqual([easy("search").proposed, easy("search").reason], ["low", "difficulty_0"]);
+  assert.equal(easy("mechanical_edit").proposed, "low");
+  for (const kind of ["implement", "debug", "review", "design"]) {
+    assert.deepEqual([easy(kind).proposed, easy(kind).reason], ["medium", "floor_for_kind"], kind);
+  }
+});
+
+test("a search that must list every match does not get the low level", () => {
+  const proposal = proposeEffort(answers({ ...searching, difficulty: 0, needsEveryMatch: 0.9 }), WORKERS.searcher, asPlainCall, config);
+  assert.deepEqual([proposal.proposed, proposal.reason], ["medium", "floor_for_kind"]);
+});
+
+test("the effort table proposes nothing where a level must not come from it", () => {
+  const none = (input, target, call = asPlainCall) => proposeEffort(answers(input), target, call, config);
+  assert.deepEqual(none({}, WORKERS.implementer, { requestedEffort: "low", keep: false }), { proposed: null, reason: "requested" });
+  assert.deepEqual(none({}, WORKERS.implementer, { keep: true }), { proposed: null, reason: "keep_requested" });
+  assert.deepEqual(none({}, "fork"), { proposed: null, reason: "fork" });
+  assert.deepEqual(none({}, WORKERS.codexImplementer), { proposed: null, reason: "codex_worker" });
+  assert.deepEqual(none({}, WORKERS.codexReviewer), { proposed: null, reason: "codex_worker" });
+  assert.deepEqual(none({ kindConfidence: 0.59 }, WORKERS.implementer), { proposed: null, reason: "low_confidence" });
+  assert.deepEqual(none({ kind: "other" }, WORKERS.implementer), { proposed: null, reason: "kind_other" });
+  assert.deepEqual(none({ difficultyConfidence: 0.49 }, WORKERS.implementer), { proposed: null, reason: "difficulty_unknown" });
+  assert.deepEqual(none({ difficultyConfidence: null }, WORKERS.implementer), { proposed: null, reason: "difficulty_unknown" });
+});
+
+test("the effort table names the level of the worker's file, and none for another owner's agent", () => {
+  const fileLevel = (target) => proposeEffort(answers(), target, asPlainCall, config).worker_default;
+  assert.equal(fileLevel(WORKERS.implementer), "high");
+  assert.equal(fileLevel(WORKERS.debugger), "medium");
+  assert.equal(fileLevel(WORKERS.searcher), null, "the searcher's file has no line");
+  assert.equal(fileLevel("Explore"), null, "the hook does not read another owner's agent file");
+});
+
+test("the off switch stops the effort table", () => {
+  assert.equal(proposeEffort(answers(), WORKERS.implementer, asPlainCall, { ...config, effortRule: "off" }), null);
 });

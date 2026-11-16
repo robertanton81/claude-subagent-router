@@ -195,6 +195,65 @@ export function readLimitsOfThread(threadId, env = process.env, now = Date.now()
   }
 }
 
+// A model name or an effort word as Codex writes it: short, with no spaces. The
+// value comes from a file that this plugin does not control and goes into a job
+// record and a printed line, so anything else counts as unknown.
+const MODEL_WORD = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+
+// True for a model name or an effort word that may be stored and printed.
+export function isModelWord(value) {
+  return typeof value === "string" && MODEL_WORD.test(value);
+}
+
+// The last `turn_context` record of the files decides alone. When its model is
+// not a model word, the answer is null: an older record would name a model
+// that an earlier turn used, as if it were the latest one.
+function lastModelIn(files) {
+  let last = null;
+  for (const file of files) {
+    let text;
+    try {
+      text = fs.readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      if (!line.includes("turn_context")) {
+        continue;
+      }
+      try {
+        const record = JSON.parse(line);
+        if (record?.type !== "turn_context") {
+          continue;
+        }
+        const model = record.payload?.model;
+        last = isModelWord(model) ? { model, effort: isModelWord(record.payload.effort) ? record.payload.effort : null } : null;
+      } catch {
+        // A line that is not complete JSON.
+      }
+    }
+  }
+  return last;
+}
+
+// The model and the effort that Codex really used for a thread, from the last
+// `turn_context` record of its session file: { model, effort }, where effort
+// can be null. `codex exec --json` prints neither. For `codex exec review` the
+// record is in the session file of the child thread, as the limit numbers are
+// (seen on codex-cli 0.162.1). Returns null when nothing can be read: the
+// session file is an internal format, so "cannot read" means "unknown".
+export function readModelOfThread(threadId, env = process.env, now = Date.now()) {
+  try {
+    if (!THREAD_ID_PATTERN.test(threadId ?? "")) {
+      return null;
+    }
+    const file = sessionFileOfThread(threadId, env, now);
+    return (file ? lastModelIn([file]) : null) ?? lastModelIn(childSessionFiles(threadId, env, now));
+  } catch {
+    return null;
+  }
+}
+
 // Codex reports up to two plan windows. On some plans `primary` is the 5-hour
 // window and `secondary` the weekly one; on others `primary` is the week and
 // `secondary` is null. Either window can stop the plan. So the numbers of the

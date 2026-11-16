@@ -8,7 +8,8 @@
 //   orch-codex.mjs cancel <job id>
 //     Stops a running job and frees the writer lock of its folder.
 //
-// For manual use and for the tests, the task text comes from stdin or from a file:
+// For manual use and for the tests, the task text comes from stdin or from a file.
+// With --brief, stdin is ignored:
 //   orch-codex.mjs implement [--brief FILE] [--model M] [--effort E] [--wait S]
 //   orch-codex.mjs review [--uncommitted | --base B | --commit SHA | --custom]
 //                         [--brief FILE] [--model M] [--effort E] [--wait S]
@@ -40,7 +41,7 @@ import { claudeRules } from "./lib/claude-rules.mjs";
 import { UsageError, briefContract, parseOptions, runsReadOnlyExec, sendsBriefToCodex, stripCodexApiKeys } from "./lib/codex-args.mjs";
 import { holdsPrivateKey, isSensitivePath } from "./lib/secret-patterns.mjs";
 import { isUsageLimitMessage } from "./lib/codex-availability.mjs";
-import { earlierLongMessages, readEvents } from "./lib/codex-events.mjs";
+import { earlierLongMessages, readEvents, readJobModel } from "./lib/codex-events.mjs";
 import { readLimitsOfThread } from "./lib/codex-limits.mjs";
 import { REQUEST_ID_PATTERN, claimRequest, recordJobOfRequest, restoreRequest } from "./lib/codex-request.mjs";
 import { dataDir, loadConfig } from "./lib/config.mjs";
@@ -190,16 +191,16 @@ function readBriefFile(file, cwd) {
 }
 
 // The task text of a manual implement, review or consult: from --brief FILE, or
-// from stdin. Both at once is a mistake, so it is refused.
+// from stdin. With --brief the file is the task and stdin is not read at all.
+// Before, stdin was read to its end first, only to refuse a call where both
+// carried a text. A caller whose stdin stays open and never sends an end (seen
+// in a resumed Claude Code session) then waited forever and started no job. A
+// file that is refused never falls back to stdin: readBriefFile throws.
 function readBrief(options, cwd) {
-  const fromStdin = readStdin();
-  if (options.briefFile === null) {
-    return fromStdin;
+  if (options.briefFile !== null) {
+    return readBriefFile(options.briefFile, cwd);
   }
-  if (fromStdin.trim().length > 0) {
-    throw new UsageError("--brief and stdin both carry a task text. Give the text in one of them.");
-  }
-  return readBriefFile(options.briefFile, cwd);
+  return readStdin();
 }
 
 function newJobId() {
@@ -441,6 +442,10 @@ function printResult(dir) {
   // saved them when Codex ended (see codex-events.mjs); here they are only shown.
   const limits = readLimitsOfThread(events.threadId);
   const used = limits ? ` codex_used=${Math.round(limits.usedPercent)}%` : "";
+  // The model that Codex really used, when the runner could read it. A job that
+  // names no model runs on the model of the owner's Codex config.
+  const observed = readJobModel(dir)?.observed;
+  const ran = observed?.model ? ` model=${observed.model}${observed.effort ? ` effort=${observed.effort}` : ""}` : "";
 
   if (code === 0 && result) {
     // Codex reports zero tokens for a review run, so show the numbers only when they are real.
@@ -449,7 +454,7 @@ function printResult(dir) {
       limits && limits.usedPercent >= 100
         ? `Note for the user: a Codex plan window is used up, so this run was paid from Codex credits. Balance now: ${limits.creditsBalance ?? "unknown"}.\n`
         : "";
-    process.stdout.write(`CODEX_JOB ${id} exit=0${describeJob(job)}${tokens}${used}\n${credits}${fullAnswer(job, result, events)}\n`);
+    process.stdout.write(`CODEX_JOB ${id} exit=0${describeJob(job)}${ran}${tokens}${used}\n${credits}${fullAnswer(job, result, events)}\n`);
     return 0;
   }
 

@@ -566,14 +566,59 @@ test("the task text can come from a file with --brief, with nothing on stdin", a
   });
 });
 
-test("--brief refuses a text on stdin, a bad file and the commands that take no text", async () => {
+test("with --brief the command does not wait for a stdin that stays open, and ignores a text on it", async () => {
+  await withSetup({}, async ({ tempDir, env }) => {
+    const briefFile = path.join(tempDir, "brief.md");
+    fs.writeFileSync(briefFile, "The question from the file\n");
+
+    // A stdin that sends nothing and never ends, as a resumed Claude Code session
+    // gave the command. Before, the command read it to its end first and waited forever.
+    const open = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [path.join(ROOT, CLI), "consult", "--brief", briefFile, "--wait", "20"], { env, cwd: tempDir, stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "";
+      child.stdout.on("data", (chunk) => (stdout += chunk));
+      // On the limit the command is killed, and the test fails only after the
+      // command has really ended, so no process of it outlives the temp folder.
+      // The stand-in Codex of this setup ends at once, so a job that did start
+      // is gone by then too.
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, 15000);
+      child.on("error", reject);
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        if (timedOut) {
+          reject(new Error(`the command still waited after 15 seconds. Output so far: ${stdout}`));
+        } else {
+          resolve({ code, stdout });
+        }
+      });
+      // child.stdin is never ended.
+    });
+    assert.equal(open.code, 0, open.stdout);
+    assert.match(open.stdout, /^CODEX_JOB \S+ exit=0 kind=consult/);
+    assert.ok(open.stdout.includes("The question from the file"), open.stdout);
+
+    // A text on stdin is not the task and does not reach Codex.
+    const both = await runNode(CLI, { args: ["consult", "--brief", briefFile, "--wait", "20"], stdin: "Another question", env, cwd: tempDir });
+    assert.equal(both.code, 0, both.stdout);
+    assert.ok(both.stdout.includes("The question from the file"), both.stdout);
+    assert.ok(!both.stdout.includes("Another question"), both.stdout);
+  });
+});
+
+test("--brief refuses a bad file and the commands that take no text, and a refused file never falls back to stdin", async () => {
   await withSetup({}, async ({ tempDir, env }) => {
     const briefFile = path.join(tempDir, "brief.md");
     fs.writeFileSync(briefFile, "Question\n");
 
-    const both = await runNode(CLI, { args: ["consult", "--brief", briefFile], stdin: "Another question", env, cwd: tempDir });
-    assert.equal(both.code, 2, both.stdout);
-    assert.match(both.stdout, /--brief and stdin both carry a task text/);
+    // A file that cannot be used is an error, also when stdin carries a usable text.
+    const fallback = await runNode(CLI, { args: ["consult", "--brief", path.join(tempDir, "nope.md")], stdin: "A text on stdin", env, cwd: tempDir });
+    assert.equal(fallback.code, 2, fallback.stdout);
+    assert.ok(!fallback.stdout.startsWith("CODEX_JOB"), fallback.stdout);
+    assert.equal(fs.existsSync(path.join(tempDir, "data", "codex-jobs")) ? fs.readdirSync(path.join(tempDir, "data", "codex-jobs")).length : 0, 0, "no job was started");
 
     const missing = await runNode(CLI, { args: ["consult", "--brief", path.join(tempDir, "nope.md")], stdin: "", env, cwd: tempDir });
     assert.equal(missing.code, 2, missing.stdout);

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+
+Codex:
+
+- **With `--brief FILE`, `orch-codex.mjs` no longer reads standard input.** Before, it read it to its end first, so a caller whose standard input stayed open made the command wait forever and start no job. A text on standard input next to `--brief` is now ignored; before, it was an error.
+- **The `CODEX_JOB` line of a finished Codex job shows the model that Codex really used,** with the effort when Codex recorded one, and the job folder keeps them in `model.json` next to what the job asked for. Before, a job that named no model left no record of the model that ran. The plugin reads this from Codex's own session file; when it cannot, the model counts as unknown.
+
 ## 0.5.0
 
 Routing:

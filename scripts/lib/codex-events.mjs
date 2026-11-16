@@ -10,7 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { isUsageLimitMessage, markCodexUnavailable } from "./codex-availability.mjs";
-import { readLimitsOfThread, saveCodexLimits } from "./codex-limits.mjs";
+import { isModelWord, readLimitsOfThread, readModelOfThread, saveCodexLimits } from "./codex-limits.mjs";
 
 // Reads events.jsonl from the end. With --json, Codex reports its own errors as
 // events on stdout, for example a used-up plan, and not on stderr.
@@ -74,6 +74,45 @@ export function jobSucceeded(dir, code) {
   }
 }
 
+// The file of a job folder that says which model ran.
+export const MODEL_FILE = "model.json";
+
+// Writes which model and effort the job asked for and which ones Codex really
+// used. A job that names no model runs on the model of the owner's Codex
+// config, so without this record nobody can say later which model wrote a
+// review. `observed` is null when the session file gave no answer; it is never
+// filled from `requested`, because a request is not proof of what ran.
+export function recordJobModel(dir, env = process.env) {
+  let requested = { model: null, effort: null };
+  try {
+    const job = JSON.parse(fs.readFileSync(path.join(dir, "job.json"), "utf8"));
+    requested = { model: typeof job.model === "string" ? job.model : null, effort: typeof job.effort === "string" ? job.effort : null };
+  } catch {
+    // The job file cannot be read. The observed values are still worth keeping.
+  }
+  const observed = readModelOfThread(readEvents(dir).threadId, env);
+  const file = path.join(dir, MODEL_FILE);
+  fs.writeFileSync(`${file}.tmp`, `${JSON.stringify({ requested, observed }, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(`${file}.tmp`, file);
+}
+
+// What recordJobModel() wrote, or null. The values are checked again here,
+// because the file can be edited by hand and they go into a printed line: a
+// value that is not a model word reads as null.
+export function readJobModel(dir) {
+  const pair = (value) => ({ model: isModelWord(value?.model) ? value.model : null, effort: isModelWord(value?.effort) ? value.effort : null });
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(dir, MODEL_FILE), "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const observed = pair(parsed.observed);
+    return { requested: pair(parsed.requested), observed: observed.model ? observed : null };
+  } catch {
+    return null;
+  }
+}
+
 // Saves the limit numbers of the job's thread, and starts the routing pause
 // when the job failed with a usage limit. Each step guards itself, because the
 // caller still has to write the exit code afterwards.
@@ -86,6 +125,11 @@ export function recordPlanState(dir, code) {
     }
   } catch (error) {
     process.stderr.write(`subagent-router: cannot save the Codex limits of the job: ${error.message}\n`);
+  }
+  try {
+    recordJobModel(dir);
+  } catch (error) {
+    process.stderr.write(`subagent-router: cannot record the model of the job: ${error.message}\n`);
   }
   if (!jobSucceeded(dir, code) && isUsageLimitMessage(events.error)) {
     markCodexUnavailable(events.error);

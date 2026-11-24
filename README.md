@@ -76,7 +76,7 @@ The full list, with what is masked and how to send less, is in [What leaves your
 | `subagent-router:codex-implementer` | Codex CLI, started by a small Haiku agent | Implements a task on the ChatGPT plan. Needs a self-contained brief. |
 | `subagent-router:codex-reviewer` | Codex CLI, started by a small Haiku agent | Reviews the uncommitted changes, a branch, a commit, or by the brief's own instructions. |
 
-Each worker's agent file sets its model, and for Sonnet and Opus the effort (how much the model thinks before answering); see [How the routing works](guide/routing.md).
+Each worker's agent file sets its model and its effort (how much the model thinks before answering); see [How the routing works](guide/routing.md).
 
 ## TypeSafe and Jev
 

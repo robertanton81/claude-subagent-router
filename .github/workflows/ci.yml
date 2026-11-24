@@ -22,7 +22,9 @@ jobs:
         # In a private repository a macOS minute costs about ten Linux minutes, so
         # there this workflow runs Linux only, and ci-macos.yml runs macOS when the
         # macOS code changes. A public repository runs both systems for free.
-        os: ${{ fromJSON(github.event.repository.private && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-latest"]') }}
+        # Ubuntu is pinned to 24.04. The 26.04 image has no bwrap-userns-restrict
+        # file under extra-profiles, and the install step below copies that file.
+        os: ${{ fromJSON(github.event.repository.private && '["ubuntu-24.04"]' || '["ubuntu-24.04", "macos-latest"]') }}
         node: [20, 22, 24, 26]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15

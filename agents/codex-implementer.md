@@ -2,6 +2,7 @@
 name: codex-implementer
 description: Runs an implementation task in the Codex CLI on the ChatGPT plan, so the work does not use Claude limits. Codex starts with no context. Use only with a complete brief that names the goal, the files, the constraints and how to verify.
 model: haiku
+effort: low
 tools: Bash
 omitClaudeMd: true
 ---

@@ -362,7 +362,7 @@ test("the effort table names the level of the worker's file, and none for anothe
   const fileLevel = (target) => proposeEffort(answers(), target, asPlainCall, config).worker_default;
   assert.equal(fileLevel(WORKERS.implementer), "high");
   assert.equal(fileLevel(WORKERS.debugger), "medium");
-  assert.equal(fileLevel(WORKERS.searcher), null, "the searcher's file has no line");
+  assert.equal(fileLevel(WORKERS.searcher), "medium");
   assert.equal(fileLevel("Explore"), null, "the hook does not read another owner's agent file");
 });
 

@@ -508,3 +508,30 @@ test("the report counts named levels and what the effort table would propose", (
   assert.deepEqual(effort.againstWorkerFile, { lower: 1, same: 1, higher: 1, unknown: 1 });
   assert.match(renderText(report), /The effort table only watches, and would propose: .*high 2/);
 });
+
+test("the report lists the model ids that ran, so a new model behind an alias shows", () => {
+  const launched = (ts, model) => ({ event: "launched", ts, session_id: "s", cwd: "/work/p", tool_use_id: ts, agent_id: ts, resolved_model: model });
+  const report = buildReport({
+    dataDir: "/tmp/none",
+    files: [],
+    log: [
+      launched("2026-10-20T10:00:00.000Z", "claude-sonnet-5-5"),
+      launched("2026-10-01T10:00:00.000Z", "claude-sonnet-5"),
+      launched("2026-10-02T10:00:00.000Z", "claude-sonnet-5"),
+      launched("2026-10-25T10:00:00.000Z", "claude-sonnet-5-5"),
+      launched("2026-10-20T11:00:00.000Z", "claude-opus-5-5"),
+      launched("2026-10-26T10:00:00.000Z", null),
+      launched("not a date", "claude-haiku-5-5"),
+      { ...launched("2026-10-27T10:00:00.000Z", "claude-opus-5-5"), event: "dispatch" }
+    ],
+    limits: []
+  });
+  assert.deepEqual(report.dispatches.modelsThatRan, [
+    { model: "claude-haiku-5-5", runs: 1, first: null, last: null },
+    { model: "claude-sonnet-5", runs: 2, first: "2026-10-01", last: "2026-10-02" },
+    { model: "claude-opus-5-5", runs: 1, first: "2026-10-20", last: "2026-10-20" },
+    { model: "claude-sonnet-5-5", runs: 2, first: "2026-10-20", last: "2026-10-25" }
+  ]);
+  assert.match(renderText(report), /Model ids that ran.*: claude-haiku-5-5 1 \(\? to \?\), claude-sonnet-5 2 \(2026-10-01 to 2026-10-02\), claude-opus-5-5 1 \(2026-10-20 to 2026-10-20\), claude-sonnet-5-5 2 \(2026-10-20 to 2026-10-25\)$/m);
+  assert.match(renderText(buildReport({ dataDir: "/tmp/none", files: [], log: [launched("2026-10-26T10:00:00.000Z", null)], limits: [] })), /Model ids that ran.*: none$/m);
+});

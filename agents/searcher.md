@@ -2,6 +2,7 @@
 name: searcher
 description: Finds, reads and explains existing code or documentation, and reports what it found. Use for questions such as "where is X handled", "how does Y work" or "which files use Z". It changes no files.
 model: haiku
+effort: medium
 tools: Read, Grep, Glob, Bash
 ---
 

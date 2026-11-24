@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 
-import { ARMS, DEFAULT_ARMS, buildInvocation, checkPassRule, compareEffortBaselines, gradeRecord, loadTaskSet, makeRecord, parseResult, renderSummary, rotateArms, summarize } from "../scripts/lib/eval.mjs";
+import { ARMS, DEFAULT_ARMS, buildInvocation, checkPassRule, compareEffortBaselines, gradeRecord, loadTaskSet, makeRecord, parseResult, readTrace, renderSummary, rotateArms, summarize } from "../scripts/lib/eval.mjs";
 import { ROOT, cleanEnv, makeTempDir, runNode } from "./helpers.mjs";
 
 // A stand-in for `claude -p`. It records its command line, its switches and its
@@ -41,7 +41,7 @@ setTimeout(() => {
     process.exit(Number(env.FAKE_CLAUDE_EXIT));
   }
   const prompt = args[args.indexOf("-p") + 1];
-  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, total_cost_usd: 0.05, num_turns: 2,
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, total_cost_usd: Number(env.FAKE_CLAUDE_COST || 0.05), num_turns: 2,
     duration_ms: 1200, duration_api_ms: 900, result: "answer to: " + prompt,
     modelUsage: { [env.ORCH_MODE === "enforce" ? "claude-haiku-4-5" : "claude-sonnet-5"]: { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 100, cacheCreationInputTokens: 20, costUSD: 0.05 } },
     permission_denials: [] }) + "\\n");
@@ -90,6 +90,8 @@ test("loadTaskSet applies the defaults and rejects a bad set", () => {
     assert.throws(() => loadTaskSet(taskSetFile), /appears twice/);
     writeTaskSet(taskSetFile, [{ name: "one", prompt: "x", cwd: "project", budgetUsd: 0 }]);
     assert.throws(() => loadTaskSet(taskSetFile), /budgetUsd must be a number above 0/);
+    writeTaskSet(taskSetFile, [{ name: "one", prompt: "x", cwd: "project", budgetUsd: 0.004 }]);
+    assert.throws(() => loadTaskSet(taskSetFile), /budgetUsd must be at least 0\.01/);
     writeTaskSet(taskSetFile, [{ name: "one", prompt: "x", cwd: "project", timeoutS: "10" }]);
     assert.throws(() => loadTaskSet(taskSetFile), /timeoutS must be a number above 0/);
     writeTaskSet(taskSetFile, [{ name: "one", prompt: "x", cwd: "project", model: "" }]);
@@ -98,11 +100,55 @@ test("loadTaskSet applies the defaults and rejects a bad set", () => {
     assert.throws(() => loadTaskSet(taskSetFile), /"allowedTools" must be a list/);
     writeTaskSet(taskSetFile, [{ name: "one", prompt: "x", cwd: "project", export: "yes" }]);
     assert.throws(() => loadTaskSet(taskSetFile), /"export" must be true or false/);
+    writeTaskSet(taskSetFile, [{ name: "one", prompt: "x", cwd: "project", trace: "yes" }]);
+    assert.throws(() => loadTaskSet(taskSetFile), /"trace" must be true or false/);
+    writeTaskSet(taskSetFile, [{ name: "one", prompt: "x", cwd: "project", trace: true }]);
+    assert.equal(loadTaskSet(taskSetFile).tasks[0].trace, true);
     writeTaskSet(taskSetFile, [{ name: "one", prompt: " ", cwd: "project" }]);
     assert.throws(() => loadTaskSet(taskSetFile), /"prompt" must be a non-empty string/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("a traced task asks for the stream format, and its record lists the skill and agent calls", () => {
+  const task = { name: "t", prompt: "do it", cwd: "/work", model: "sonnet", budgetUsd: 1, timeoutS: 10, allowedTools: ["Read", "Skill"], export: false };
+  const options = { claudeBin: "/fake/claude", pluginDir: "/plugin", dataDir: "/data", baseEnv: { PATH: "/bin" } };
+  const format = (argv) => argv.slice(argv.indexOf("--output-format") + 1, argv.indexOf("--model"));
+  assert.deepEqual(format(buildInvocation(task, "off", options).argv), ["json"]);
+  assert.deepEqual(format(buildInvocation({ ...task, trace: true }, "off", options).argv), ["stream-json", "--verbose"]);
+
+  const use = (name, input) => ({ type: "tool_use", id: "x", name, input });
+  const stdout = [
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({ type: "assistant", parent_tool_use_id: null, message: { content: [{ type: "text", text: "ok" }, use("Skill", { skill: "p:verified-review" }), use("Read", { file_path: "a" })] } }),
+    "not a json line",
+    JSON.stringify({ type: "assistant", parent_tool_use_id: null, message: { content: [use("Agent", { subagent_type: "p:reviewer", model: "sonnet", prompt: "x" }), use("Read", {})] } }),
+    JSON.stringify({ type: "assistant", parent_tool_use_id: "toolu_1", message: { content: [use("Skill", { skill: "p:review" }), use("Skill", {})] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", content: JSON.stringify(use("Skill", { skill: "fake" })) }] } }),
+    JSON.stringify({ type: "result", is_error: false, total_cost_usd: 0.3, num_turns: 4, result: "done" })
+  ].join("\n");
+  assert.deepEqual(readTrace(stdout), {
+    tools: { Skill: 3, Read: 2, Agent: 1 },
+    skills: [{ skill: "p:verified-review", main: true }, { skill: "p:review", main: false }, { skill: null, main: false }],
+    agents: [{ agent: "p:reviewer", model: "sonnet", main: true }]
+  });
+  assert.equal(readTrace(""), null, "no message line is no trace, not an empty trace");
+  assert.equal(readTrace(JSON.stringify({ is_error: false, result: "x" })), null);
+
+  const outcome = { stdout, stderr: "", code: 0, signal: null, timedOut: false, durationMs: 5 };
+  const traced = makeRecord({ task: { ...task, trace: true }, arm: "off", run: 1, invocation: { cwd: "/work" }, outcome, dataDir: "/nonexistent" });
+  assert.deepEqual([traced.cost_usd, traced.is_error, traced.result, traced.trace.skills.length], [0.3, false, "done", 3]);
+  assert.equal("trace" in makeRecord({ task, arm: "off", run: 1, invocation: { cwd: "/work" }, outcome, dataDir: "/nonexistent" }), false);
+
+  // A traced run that was stopped before its result line has no result: the
+  // last message line must not be read as one.
+  const cut = stdout.split("\n").slice(0, -1).join("\n");
+  assert.equal(parseResult(cut), null);
+  assert.equal(parseResult(JSON.stringify({ type: "system", subtype: "init" })), null, "a stream that holds one line and no result has no result");
+  assert.deepEqual(readTrace(JSON.stringify({ type: "assistant", message: { content: [use("Task", { subagent_type: "p:searcher" })] } })).agents, [{ agent: "p:searcher", model: null, main: true }], "the older tool name Task is an agent call too");
+  const stopped = makeRecord({ task: { ...task, trace: true }, arm: "off", run: 1, invocation: { cwd: "/work" }, outcome: { ...outcome, stdout: cut, code: null, signal: "SIGKILL", timedOut: true }, dataDir: "/nonexistent" });
+  assert.deepEqual([stopped.cost_usd, stopped.timed_out, stopped.trace.tools.Skill], [null, true, 3]);
 });
 
 test("buildInvocation gives each arm its switches and keeps the shell's own out", () => {
@@ -207,105 +253,220 @@ test("an answer that was cut short is not graded either way", () => {
   assert.deepEqual([older.cutOff, older.pass], [false, true]);
 });
 
-test("an arm that fails more often than the baseline does not pass", () => {
-  const arm = (extra = {}) => {
-    const base = { runs: 6, errors: 0, timeouts: 0, cost_mean_usd: 0.1, cost_stderr_usd: 0.0005, cache_created_mean: 20000, failed_graders: {}, ...extra };
-    const graded = base.runs - base.errors - base.timeouts;
-    return { ...base, graded, passed: graded, pass_rate: 1 };
+// One arm of a summary, as the pass rule reads it. In a task without `verify`, a run
+// that errored or timed out is not graded, so the fixture derives the graded runs
+// from the runs that survived rather than letting a test state an impossible arm.
+function ruleArm(extra = {}) {
+  const base = { runs: 3, errors: 0, timeouts: 0, tokens_mean: 1000, tokens_stderr: 5, wall_mean_ms: 10000, wall_stderr_ms: 50, cache_created_mean: 20000, route_failed: 0, failed_graders: {}, ...extra };
+  const graded = extra.accuracy_graded ?? base.runs - base.errors - base.timeouts;
+  const passed = extra.accuracy_passed ?? graded;
+  return {
+    tokens_known: base.runs,
+    wall_known: base.runs,
+    ...base,
+    accuracy_graded: graded,
+    accuracy_passed: passed,
+    accuracy: extra.accuracy ?? (graded === 0 ? null : passed / graded)
   };
-  // Cheaper, and every run it finished was right, but half its runs fell over.
-  const flaky = checkPassRule({ tasks: { t: { jev: arm({ errors: 2, timeouts: 1, cost_mean_usd: 0.05 }), sonnet: arm() } } });
-  assert.equal(flaky.t.verdict, "FAIL");
-  assert.match(flaky.t.reasons[0], /failed in a larger share of its runs than the baseline \(3 of 6, 50%, against 0 of 6, 0%\)/);
+}
+const ruleFor = (jev, sonnet = {}) => checkPassRule({ tasks: { t: { jev: ruleArm(jev), sonnet: ruleArm(sonnet) } } }).t;
+
+test("an arm that fails more often than the baseline does not pass", () => {
+  // Fewer tokens, and every run it finished was right, but half its runs fell over.
+  const flaky = ruleFor({ runs: 6, errors: 2, timeouts: 1, tokens_mean: 500 }, { runs: 6 });
+  assert.equal(flaky.verdict, "FAIL");
+  assert.match(flaky.reasons[0], /failed in a larger share of its runs than the baseline \(3 of 6, 50%, against 0 of 6, 0%\)/);
 
   // The same number of failures over different totals. Counting them would call
   // these arms equal; as shares, the routing arm is three times worse. The arms
   // end up with different totals whenever a run stops early or an arm is rerun.
-  const sameCountWorseShare = checkPassRule({
-    tasks: { t: { jev: arm({ runs: 6, errors: 2, cost_mean_usd: 0.05 }), sonnet: arm({ runs: 20, errors: 2 }) } }
-  });
-  assert.equal(sameCountWorseShare.t.verdict, "FAIL", "2 failures in 6 is worse than 2 in 20, though the counts are equal");
-  assert.match(sameCountWorseShare.t.reasons[0], /2 of 6, 33%, against 2 of 20, 10%/);
+  const sameCountWorseShare = ruleFor({ runs: 6, errors: 2, tokens_mean: 500 }, { runs: 20, errors: 2 });
+  assert.equal(sameCountWorseShare.verdict, "FAIL", "2 failures in 6 is worse than 2 in 20, though the counts are equal");
+  assert.match(sameCountWorseShare.reasons[0], /2 of 6, 33%, against 2 of 20, 10%/);
 
   // The other way round: more failures, smaller share, so not a reason to fail.
-  const moreButBetter = checkPassRule({
-    tasks: { t: { jev: arm({ runs: 20, errors: 2, cost_mean_usd: 0.05 }), sonnet: arm({ runs: 6, errors: 2 }) } }
-  });
-  assert.equal(moreButBetter.t.verdict, "PASS");
-
+  assert.equal(ruleFor({ runs: 20, errors: 2, tokens_mean: 500 }, { runs: 6, errors: 2 }).verdict, "PASS");
   // The same failure count on both arms is not evidence against the routing.
-  const even = checkPassRule({ tasks: { t: { jev: arm({ errors: 1, cost_mean_usd: 0.05 }), sonnet: arm({ errors: 1 }) } } });
-  assert.equal(even.t.verdict, "PASS");
+  assert.equal(ruleFor({ runs: 6, errors: 1, tokens_mean: 500 }, { runs: 6, errors: 1 }).verdict, "PASS");
 });
 
-test("checkPassRule refuses a verdict on too few runs or on unequal cache warmth", () => {
-  // In a task without `verify`, a run that errored or timed out is not graded,
-  // so the fixture derives `graded` from the runs that survived rather than
-  // letting a test state an impossible arm, such as 2 runs with 3 grades.
-  const arm = (extra = {}) => {
-    const base = { runs: 3, errors: 0, timeouts: 0, cost_mean_usd: 0.1, cost_stderr_usd: 0.0005, cache_created_mean: 20000, failed_graders: {}, ...extra };
-    const graded = extra.graded ?? base.runs - base.errors - base.timeouts;
-    const passed = extra.passed ?? graded;
-    return { ...base, graded, passed, pass_rate: extra.pass_rate ?? (graded === 0 ? null : passed / graded) };
-  };
-  const summary = (jev, sonnet) => ({ tasks: { t: { jev: arm(jev), sonnet: arm(sonnet) } } });
+test("the pass rule puts accuracy first, so a correct move to a larger model can pass", () => {
+  // A clear win passes although it uses far more tokens and time.
+  const win = ruleFor(
+    { runs: 5, accuracy_graded: 5, accuracy_passed: 5, tokens_mean: 9000, wall_mean_ms: 90000 },
+    { runs: 5, accuracy_graded: 5, accuracy_passed: 0, accuracy: 0 }
+  );
+  assert.equal(win.verdict, "PASS");
+  assert.match(win.reasons[0], /clearly more accurate/);
 
-  assert.equal(checkPassRule(summary({ cost_mean_usd: 0.05 }, {})).t.verdict, "PASS");
-  assert.equal(checkPassRule(summary({ cost_mean_usd: 0.2 }, {})).t.verdict, "FAIL", "the routing arm must cost less");
-  assert.match(checkPassRule(summary({ cost_mean_usd: 0.2 }, {})).t.reasons[0], /costs more than the baseline/);
-  assert.equal(checkPassRule(summary({ cost_mean_usd: 0.05, passed: 2, pass_rate: 2 / 3 }, {})).t.verdict, "FAIL", "a cheaper but worse arm fails");
-  assert.equal(checkPassRule(summary({ cost_mean_usd: 0.05, failed_graders: { route: 1 } }, {})).t.verdict, "FAIL", "a wrong route fails even when cheap and correct");
+  // 3 of 3 against 0 of 3: the ranges overlap, so this is no clear win, and at more
+  // tokens it is neither a pass nor a failure.
+  const notClear = ruleFor({ tokens_mean: 9000 }, { accuracy_passed: 0, accuracy: 0 });
+  assert.equal(notClear.verdict, "NOT DECIDED");
+  assert.match(notClear.reasons[0], /more accurate, not clearly, and uses more tokens/);
+  assert.match(notClear.reasons[1], /jev 3 of 3 \(range 44% to 100%\), sonnet 0 of 3 \(range 0% to 56%\)/);
+  // The same higher rate with fewer tokens passes.
+  assert.equal(ruleFor({ tokens_mean: 500 }, { accuracy_passed: 0, accuracy: 0 }).verdict, "PASS");
 
-  // The real run of 2026-09-22: the arms were $0.0024 apart, and the runs were
-  // uncertain by about $0.014. Without this guard the rule read that as FAIL.
-  const noisy = checkPassRule(summary({ cost_mean_usd: 0.0768, cost_stderr_usd: 0.0070 }, { cost_mean_usd: 0.0744, cost_stderr_usd: 0.0011 }));
-  assert.equal(noisy.t.verdict, "NOT DECIDED");
-  assert.match(noisy.t.reasons[0], /cannot be told apart from noise/);
-  // A wrong route is still a failure, even when the cost is pure noise.
-  const noisyWrongRoute = checkPassRule(summary({ cost_mean_usd: 0.0768, cost_stderr_usd: 0.0070, failed_graders: { route: 2 } }, { cost_mean_usd: 0.0744, cost_stderr_usd: 0.0011 }));
-  assert.equal(noisyWrongRoute.t.verdict, "FAIL");
-  assert.match(noisyWrongRoute.t.reasons[0], /route was not the expected one in 2 of 3/);
-  // A saving wider than the uncertainty is a real result, in both directions.
-  assert.equal(checkPassRule(summary({ cost_mean_usd: 0.05 }, { cost_mean_usd: 0.1 })).t.verdict, "PASS");
-  assert.equal(checkPassRule(summary({ cost_mean_usd: 0.1 }, { cost_mean_usd: 0.05 })).t.verdict, "FAIL");
+  // Any loss that was seen fails, whatever the tokens and the time did.
+  const loss = ruleFor({ accuracy_passed: 2, tokens_mean: 100, wall_mean_ms: 100 });
+  assert.equal(loss.verdict, "FAIL");
+  assert.match(loss.reasons[0], /answers worse than the baseline \(67% against 100%\)/);
+  // A wrong route fails on its own, and it does not read as an accuracy loss.
+  const route = ruleFor({ tokens_mean: 500, route_failed: 2 });
+  assert.equal(route.verdict, "FAIL");
+  assert.deepEqual(route.reasons, ["the route was not the expected one in 2 of 3 runs"]);
+  // It fails even next to a clear accuracy win, and when neither arm answered right.
+  const routeOnly = ["the route was not the expected one in 1 of 5 runs"];
+  assert.deepEqual(ruleFor({ runs: 5, route_failed: 1 }, { runs: 5, accuracy_passed: 0, accuracy: 0 }), { verdict: "FAIL", reasons: routeOnly });
+  assert.deepEqual(ruleFor({ runs: 5, accuracy_passed: 0, route_failed: 1 }, { runs: 5, accuracy_passed: 0 }), { verdict: "FAIL", reasons: routeOnly });
+  // Every failure that was seen is named.
+  const allThree = ruleFor({ runs: 6, errors: 2, accuracy_graded: 4, accuracy_passed: 2, route_failed: 1 }, { runs: 6 });
+  assert.equal(allThree.verdict, "FAIL");
+  assert.equal(allThree.reasons.length, 3);
+  assert.match(allThree.reasons.join("\n"), /answers worse[^]*route was not[^]*larger share/);
 
-  // More runs must make a verdict easier, not harder. The same gap and the same
-  // run-to-run scatter, measured over more runs, has to stay decidable.
-  const scatter = 0.012;
+  // Two arms that are both always wrong: fewer tokens must not make this a pass.
+  const bothWrong = ruleFor({ accuracy_passed: 0, tokens_mean: 500 }, { accuracy_passed: 0 });
+  assert.equal(bothWrong.verdict, "NOT DECIDED");
+  assert.match(bothWrong.reasons[0], /neither arm answered right/);
+});
+
+test("the pass rule goes to tokens and then to time, each with a margin fixed in advance", () => {
+  const pass = ruleFor({ tokens_mean: 500 });
+  assert.equal(pass.verdict, "PASS");
+  assert.match(pass.reasons[0], /fewer tokens \(jev 500, sonnet 1,000 tokens\)/);
+  assert.match(pass.reasons[1], /no accuracy loss seen/, "the verdict says that this is no proof of equal accuracy");
+  const more = ruleFor({ tokens_mean: 2000 });
+  assert.equal(more.verdict, "FAIL");
+  assert.match(more.reasons[0], /uses more tokens than the baseline/);
+
+  // The margin is 10 percent of the baseline. The gap at exactly the margin, with
+  // no noise, is the same; one token more is a real difference.
+  const exact = (tokens) => ruleFor({ tokens_mean: tokens, tokens_stderr: 0, wall_mean_ms: 5000 }, { tokens_stderr: 0 });
+  assert.match(exact(1100).reasons[0], /same tokens, and the jev arm is faster/);
+  assert.equal(exact(1101).verdict, "FAIL");
+  assert.equal(exact(899).verdict, "PASS");
+  assert.match(exact(900).reasons[0], /same tokens, and the jev arm is faster/, "the margin holds on the low side too");
+  assert.match(exact(899).reasons[0], /fewer tokens/);
+
+  // A small gap in noisy runs is not the same as equal tokens, so time must not decide.
+  const noisy = ruleFor({ tokens_mean: 7680, tokens_stderr: 700, wall_mean_ms: 100 }, { tokens_mean: 7440, tokens_stderr: 110 });
+  assert.equal(noisy.verdict, "NOT DECIDED");
+  assert.match(noisy.reasons[0], /tokens cannot be told apart from noise/);
+  // A wrong route is still a failure, even when the tokens are pure noise.
+  const noisyWrongRoute = ruleFor({ tokens_mean: 7680, tokens_stderr: 700, route_failed: 2 }, { tokens_mean: 7440, tokens_stderr: 110 });
+  assert.equal(noisyWrongRoute.verdict, "FAIL");
+  assert.match(noisyWrongRoute.reasons[0], /route was not the expected one in 2 of 3/);
+
+  // Time decides only when the tokens are the same.
+  assert.equal(ruleFor({ wall_mean_ms: 5000 }).verdict, "PASS");
+  const slower = ruleFor({ wall_mean_ms: 20000 });
+  assert.equal(slower.verdict, "FAIL");
+  assert.match(slower.reasons[0], /uses more time than the baseline \(jev 20\.0 s, sonnet 10\.0 s\)/);
+  const same = ruleFor({});
+  assert.equal(same.verdict, "NOT DECIDED");
+  assert.match(same.reasons[0], /no difference in tokens or time/);
+  const noisyTime = ruleFor({ wall_mean_ms: 10500, wall_stderr_ms: 2000 });
+  assert.equal(noisyTime.verdict, "NOT DECIDED");
+  assert.match(noisyTime.reasons[0], /time cannot be told apart from noise/);
+
+  // The time margin is 10 percent of the baseline too.
+  const exactTime = (ms) => ruleFor({ wall_mean_ms: ms, wall_stderr_ms: 0 }, { wall_stderr_ms: 0 });
+  assert.match(exactTime(11000).reasons[0], /no difference in tokens or time/);
+  assert.equal(exactTime(11001).verdict, "FAIL");
+  assert.equal(exactTime(8999).verdict, "PASS");
+  // A higher accuracy that is no clear win turns more time into no verdict.
+  const slowerButBetter = ruleFor({ wall_mean_ms: 20000 }, { accuracy_passed: 0, accuracy: 0 });
+  assert.equal(slowerButBetter.verdict, "NOT DECIDED");
+  assert.match(slowerButBetter.reasons[0], /more accurate, not clearly, and uses more time/);
+
+  // Tokens that went up cannot be saved by time when the accuracy is no higher.
+  assert.equal(ruleFor({ tokens_mean: 2000, wall_mean_ms: 100 }).verdict, "FAIL");
+
+  // More runs must make a verdict easier, not harder.
+  const scatter = 120;
   const decide = (runs) =>
-    checkPassRule(
-      summary(
-        { runs, cost_mean_usd: 0.17, cost_stderr_usd: scatter / Math.sqrt(runs) },
-        { runs, cost_mean_usd: 0.245, cost_stderr_usd: scatter / Math.sqrt(runs) }
-      )
-    ).t.verdict;
+    ruleFor({ runs, tokens_mean: 1700, tokens_stderr: scatter / Math.sqrt(runs) }, { runs, tokens_mean: 2450, tokens_stderr: scatter / Math.sqrt(runs) }).verdict;
   assert.equal(decide(3), "PASS");
   assert.equal(decide(9), "PASS", "adding runs never turns a decided result back into noise");
-
-  const tooFew = checkPassRule(summary({ runs: 2, cost_mean_usd: 0.05 }, {}));
-  assert.equal(tooFew.t.verdict, "NOT DECIDED");
-  assert.match(tooFew.t.reasons[0], /fewer than 3 graded runs/);
-  const errored = checkPassRule(summary({ runs: 3, errors: 1, cost_mean_usd: 0.05 }, {}));
-  assert.match(errored.t.reasons[0], /fewer than 3 graded runs/, "in a task without `verify` an errored run is not graded, so it is not evidence");
-  // The summary does not say whether the task had `verify`, so the reason must
-  // hold for both kinds. With `verify` an errored run is graded, as a failure.
-  assert.match(errored.t.reasons[0], /a task without `verify` does not grade a run that errored, timed out or was cut off; a task with `verify` grades every run, and an errored or timed-out run fails/);
-  assert.ok(!errored.t.reasons[0].includes("cannot be graded"), errored.t.reasons[0]);
-  assert.match(errored.t.reasons[0], /\(jev 2 of 3, sonnet 3 of 3\)/, "the reason counts the graded runs of each arm");
-  // The rule holds for the baseline arm too: a short baseline is no evidence.
-  const shortBaseline = checkPassRule(summary({ cost_mean_usd: 0.05 }, { runs: 3, errors: 1 }));
-  assert.equal(shortBaseline.t.verdict, "NOT DECIDED");
-  assert.match(shortBaseline.t.reasons[0], /fewer than 3 graded runs per arm \(jev 3 of 3, sonnet 2 of 3\)/);
-
-  const cache = checkPassRule(summary({ cost_mean_usd: 0.05, cache_created_mean: 60000 }, {}));
-  assert.equal(cache.t.verdict, "NOT DECIDED");
-  assert.match(cache.t.reasons[0], /prompt cache \(a factor of 3\.0\)/);
-  assert.equal(checkPassRule({ tasks: { t: { jev: arm({}) } } }).t.verdict, "NOT DECIDED", "without the baseline arm there is no verdict");
 });
 
-// Found by the Codex review of 2026-09-24. When the hook agrees with a worker's
-// own model, the dispatch record keeps `final.model` null, and only the
-// `launched` record says which model ran.
+test("the pass rule refuses a verdict on too few runs, missing numbers or unequal cache warmth", () => {
+  const tooFew = ruleFor({ runs: 2, tokens_mean: 500 });
+  assert.equal(tooFew.verdict, "NOT DECIDED");
+  assert.match(tooFew.reasons[0], /fewer than 3 graded runs/);
+  const errored = ruleFor({ errors: 1, tokens_mean: 500 });
+  assert.match(errored.reasons[0], /fewer than 3 graded runs/, "in a task without `verify` an errored run is not graded, so it is not evidence");
+  // The summary does not say whether the task had `verify`, so the reason must
+  // hold for both kinds. With `verify` an errored run is graded, as a failure.
+  assert.match(errored.reasons[0], /a task without `verify` does not grade a run that errored, timed out or was cut off; a task with `verify` grades every run, and an errored or timed-out run fails/);
+  assert.match(errored.reasons[0], /\(jev 2 of 3, sonnet 3 of 3\)/, "the reason counts the graded runs of each arm");
+  // The rule holds for the baseline arm too: a short baseline is no evidence.
+  const shortBaseline = ruleFor({ tokens_mean: 500 }, { errors: 1 });
+  assert.equal(shortBaseline.verdict, "NOT DECIDED");
+  assert.match(shortBaseline.reasons[0], /fewer than 3 graded runs per arm \(jev 3 of 3, sonnet 2 of 3\)/);
+  // A task whose only grader is the route grader has no accuracy.
+  const routeOnly = ruleFor({ accuracy_graded: 0 }, { accuracy_graded: 0 });
+  assert.equal(routeOnly.verdict, "NOT DECIDED");
+  assert.match(routeOnly.reasons.join("\n"), /no answer grader ran/);
+
+  // A run with no token count stays unknown: it never reads as zero.
+  const noTokens = ruleFor({ tokens_mean: 500, tokens_known: 1 });
+  assert.equal(noTokens.verdict, "NOT DECIDED");
+  assert.match(noTokens.reasons[0], /too few runs reported tokens \(jev 1, sonnet 3\)/);
+  assert.match(ruleFor({ tokens_mean: 500 }, { tokens_known: 1 }).reasons[0], /too few runs reported tokens \(jev 3, sonnet 1\)/);
+  assert.match(ruleFor({ tokens_mean: null }).reasons[0], /too few runs reported tokens/);
+  const noClock = ruleFor({ wall_known: 1, wall_mean_ms: 100 });
+  assert.equal(noClock.verdict, "NOT DECIDED", "a time known from too few runs cannot decide");
+  assert.match(noClock.reasons[0], /too few runs reported a time \(jev 1, sonnet 3\)/);
+
+  // A summary from before the accuracy fields existed gets no verdict and no NaN.
+  const old = { runs: 4, errors: 1, timeouts: 0, graded: 3, passed: 3, pass_rate: 1, cost_mean_usd: 0.1, cache_created_mean: 20000, failed_graders: {} };
+  const oldRule = checkPassRule({ tasks: { t: { jev: old, sonnet: { ...old, runs: 3, errors: 0 } } } }).t;
+  assert.equal(oldRule.verdict, "NOT DECIDED");
+  assert.match(oldRule.reasons[0], /no usable accuracy counts.*--regrade/);
+  // More passes than graded runs is no pass rate, so it gets no range and no verdict.
+  assert.match(ruleFor({ accuracy_passed: 4, tokens_mean: 500 }).reasons[0], /no usable accuracy counts/);
+
+  // Unequal cache warmth blocks tokens, and time must not decide in their place.
+  const cache = ruleFor({ tokens_mean: 500, wall_mean_ms: 100, cache_created_mean: 60000 });
+  assert.equal(cache.verdict, "NOT DECIDED");
+  assert.match(cache.reasons[0], /prompt cache \(a factor of 3\.0\)/);
+  // It does not hide an accuracy result: a loss still fails, and a clear win still passes.
+  assert.equal(ruleFor({ accuracy_passed: 2, cache_created_mean: 60000 }).verdict, "FAIL");
+  assert.equal(
+    ruleFor({ runs: 5, cache_created_mean: 60000 }, { runs: 5, accuracy_passed: 0, accuracy: 0 }).verdict,
+    "PASS"
+  );
+  assert.equal(checkPassRule({ tasks: { t: { jev: ruleArm() } } }).t.verdict, "NOT DECIDED", "without the baseline arm there is no verdict");
+});
+
+test("the summary keeps accuracy, the route and the tokens apart", () => {
+  const usage = { "claude-a": { inputTokens: 10, outputTokens: 5, cacheCreationInputTokens: 100, cacheReadInputTokens: 9000 }, "claude-b": { inputTokens: 1, outputTokens: 2 } };
+  const task = { name: "t", expect: { contains: ["needle"] }, expectRoute: { model: "haiku" } };
+  const run = (extra) => ({ task: "t", arm: "jev", is_error: false, timed_out: false, result: "needle", result_chars: 6, cost_usd: 0.1, wall_ms: 100, model_usage: usage, dispatches: [], ...extra });
+  const summary = summarize(
+    [
+      // The right answer on the wrong route: a route failure, and no accuracy loss.
+      run({}),
+      run({ model_usage: {} }),
+      run({ arm: "sonnet" })
+    ],
+    [task]
+  );
+  const jev = summary.tasks.t.jev;
+  assert.deepEqual([jev.accuracy_graded, jev.accuracy_passed, jev.accuracy], [2, 2, 1]);
+  assert.equal(jev.route_failed, 2);
+  assert.equal(jev.pass_rate, 0, "the old pass rate still joins the two graders");
+  assert.equal(jev.tokens_mean, 118, "input, output and cache writes over all models, with no cache reads");
+  assert.equal(jev.tokens_known, 1, "a run with no usage stays unknown and does not count as zero");
+  assert.deepEqual([summary.tasks.t.sonnet.accuracy, summary.tasks.t.sonnet.route_failed], [1, 0], "only the routing arm gets the route grader");
+  assert.equal(jev.wall_known, 2);
+});
+
+// When the hook agrees with a worker's own model, the dispatch record keeps
+// `final.model` null, and only the `launched` record says which model ran.
 test("the route grader accepts a worker that ran on its own default model", () => {
   const task = { name: "t", expectRoute: { agent: "subagent-router:searcher", model: "haiku" } };
   const base = { task: "t", arm: "jev", is_error: false, timed_out: false, result: "x" };
@@ -314,7 +475,7 @@ test("the route grader accepts a worker that ran on its own default model", () =
   assert.equal(gradeRecord({ ...base, dispatches: inherited("claude-haiku-4-5-20251001") }, task).pass, true, "Haiku ran, so the route is the expected one");
   assert.equal(gradeRecord({ ...base, dispatches: inherited("claude-sonnet-5") }, task).pass, false, "Sonnet ran, so the route is wrong");
   assert.equal(gradeRecord({ ...base, dispatches: inherited(null) }, task).pass, false, "an unknown model is not a match");
-  // A model that the hook set wins over the launched one, as before.
+  // A model that the hook set wins over the launched one.
   const set = [{ final: { agent: "subagent-router:searcher", model: "sonnet" }, resolved_model: "claude-haiku-4-5-20251001" }];
   assert.equal(gradeRecord({ ...base, dispatches: set }, task).pass, false);
 });
@@ -325,13 +486,13 @@ test("the route grader accepts a worker that ran on its own default model", () =
 test("a cache write of zero against a positive one blocks the verdict", () => {
   const arm = (extra = {}) => ({ runs: 3, errors: 0, timeouts: 0, graded: 3, passed: 3, pass_rate: 1, cost_mean_usd: 0.1, cost_stderr_usd: 0.0005, cache_created_mean: 60000, failed_graders: {}, ...extra });
 
-  const rule = checkPassRule({ tasks: { t: { jev: arm({ cost_mean_usd: 0.05, cache_created_mean: 0 }), sonnet: arm() } } });
-  assert.equal(rule.t.verdict, "NOT DECIDED");
-  assert.match(rule.t.reasons[0], /prompt cache \(one arm wrote nothing\)/);
+  const rule = ruleFor({ tokens_mean: 500, cache_created_mean: 0 }, { cache_created_mean: 60000 });
+  assert.equal(rule.verdict, "NOT DECIDED");
+  assert.match(rule.reasons[0], /prompt cache \(one arm wrote nothing\)/);
   const effort = compareEffortBaselines({ tasks: { t: { jev: arm({ cache_created_mean: 0 }), low: arm({ cost_mean_usd: 0.05 }) } } });
   assert.equal(effort.t.low.outcome, "not compared");
   // Two arms that both wrote nothing are equally cold, so they compare.
-  assert.equal(checkPassRule({ tasks: { t: { jev: arm({ cost_mean_usd: 0.05, cache_created_mean: 0 }), sonnet: arm({ cache_created_mean: 0 }) } } }).t.verdict, "PASS");
+  assert.equal(ruleFor({ tokens_mean: 500, cache_created_mean: 0 }, { cache_created_mean: 0 }).verdict, "PASS");
 });
 
 // Found by the Codex review of 2026-09-24. A task name is free text, and a
@@ -371,7 +532,7 @@ test("compareEffortBaselines says whether a plain session at lower effort beats 
   assert.deepEqual(compareEffortBaselines({ tasks: { t: { low: arm(), sonnet: arm() } } }), {});
   assert.deepEqual(compareEffortBaselines({ tasks: { t: { jev: arm(), sonnet: arm() } } }), {});
   // The pass rule itself does not change: it still reads jev against sonnet only.
-  const both = { tasks: { t: { jev: arm({ cost_mean_usd: 0.1 }), sonnet: arm(), low: arm({ cost_mean_usd: 0.05 }) } } };
+  const both = { tasks: { t: { jev: { ...arm({ cost_mean_usd: 0.1 }), ...ruleArm({ tokens_mean: 500 }) }, sonnet: { ...arm(), ...ruleArm() }, low: arm({ cost_mean_usd: 0.05 }) } } };
   assert.equal(checkPassRule(both).t.verdict, "PASS");
   assert.match(renderSummary({ runs: 9, cost_usd: 1, errors: 0, timeouts: 0, tasks: both.tasks }), /effort baselines against jev \(information only, not the pass rule\):\n  t, low: low is cheaper/);
 });
@@ -539,6 +700,43 @@ test("a failed run is an error, and --max-total-usd stops the command", async ()
     assert.equal(capped.code, 3);
     assert.equal(readLines(path.join(tempDir, "capped", "runs.jsonl")).length, 3);
     assert.match(capped.stderr, /stopped by --max-total-usd after \$0\.150/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a run with no cost counts at the cap that Claude got, and the total is exact", async () => {
+  const { tempDir, project, taskSetFile, log, env } = setUp();
+  const slow = { ...env, FAKE_CLAUDE_SLEEP_MS: "5000" };
+  const capsSent = () => readLines(log).map((call) => call.args[call.args.indexOf("--max-budget-usd") + 1]);
+  try {
+    // A budget of $0.006 reaches Claude as a cap of $0.01. Two timed-out runs
+    // fill the limit of $0.02; counted at $0.006 each, all four would start.
+    writeTaskSet(taskSetFile, [{ name: "one", prompt: "x", cwd: project, timeoutS: 1, budgetUsd: 0.006 }]);
+    const rounded = await runNode("scripts/orch-eval.mjs", { args: [taskSetFile, "--arms", "off,jev", "--runs", "2", "--max-total-usd", "0.02", "--out", path.join(tempDir, "rounded")], env: slow });
+    assert.equal(rounded.code, 3, rounded.stderr);
+    assert.deepEqual(readLines(path.join(tempDir, "rounded", "runs.jsonl")).map((record) => record.cost_usd), [null, null]);
+    assert.deepEqual(capsSent(), ["0.01", "0.01"]);
+    assert.match(rounded.stderr, /stopped by --max-total-usd after \$0\.020/);
+
+    // In float dollars 0.1 + 0.7 stays below 0.8, so a third run would start.
+    fs.rmSync(log);
+    writeTaskSet(taskSetFile, [
+      { name: "one", prompt: "x", cwd: project, timeoutS: 1, budgetUsd: 0.1 },
+      { name: "two", prompt: "y", cwd: project, timeoutS: 1, budgetUsd: 0.7 },
+      { name: "three", prompt: "z", cwd: project, timeoutS: 1, budgetUsd: 0.1 }
+    ]);
+    const exact = await runNode("scripts/orch-eval.mjs", { args: [taskSetFile, "--arms", "off", "--max-total-usd", "0.8", "--out", path.join(tempDir, "exact")], env: slow });
+    assert.equal(exact.code, 3, exact.stderr);
+    assert.deepEqual(readLines(path.join(tempDir, "exact", "runs.jsonl")).map((record) => record.task), ["one", "two"]);
+    assert.match(exact.stderr, /stopped by --max-total-usd after \$0\.800/);
+
+    // Three reported costs of $0.0333334 pass the limit of $0.1. Rounded to
+    // the nearest millionth they would sum to $0.099999 and a fourth run would start.
+    writeTaskSet(taskSetFile, [{ name: "one", prompt: "x", cwd: project, timeoutS: 30 }]);
+    const fine = await runNode("scripts/orch-eval.mjs", { args: [taskSetFile, "--arms", "off,jev", "--runs", "2", "--max-total-usd", "0.1", "--out", path.join(tempDir, "fine")], env: { ...env, FAKE_CLAUDE_COST: "0.0333334" } });
+    assert.equal(fine.code, 3, fine.stderr);
+    assert.deepEqual(readLines(path.join(tempDir, "fine", "runs.jsonl")).map((record) => record.cost_usd), [0.0333334, 0.0333334, 0.0333334]);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

@@ -42,8 +42,8 @@ export const DEFAULT_ARMS = ["off", "sonnet", "shadow", "jev"];
 export const EFFORT_ARMS = ["low", "medium"];
 
 const TASK_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const TASK_FIELDS = ["model", "budgetUsd", "timeoutS", "allowedTools", "export", "history", "expect", "expectRoute", "verify"];
-const DEFAULTS = { model: "sonnet", budgetUsd: 1, timeoutS: 600, allowedTools: ["Read", "Glob", "Grep", "Agent"], export: false, history: false };
+const TASK_FIELDS = ["model", "budgetUsd", "timeoutS", "allowedTools", "export", "history", "expect", "expectRoute", "verify", "trace"];
+const DEFAULTS = { model: "sonnet", budgetUsd: 1, timeoutS: 600, allowedTools: ["Read", "Glob", "Grep", "Agent"], export: false, history: false, trace: false };
 // The switches that an arm sets. They are removed from the parent environment
 // first, so a value from the shell never reaches the wrong arm. The forced
 // subagent model must stay off in the plugin arms: with it the hook cannot set a model.
@@ -84,6 +84,15 @@ function pick(source, keys) {
     }
   }
   return out;
+}
+
+/**
+ * The cost cap of one run in dollars, rounded to the whole cents that
+ * `--max-budget-usd` is sent with. The total limit must charge this amount
+ * for a run with no reported cost, or the runs can pass the limit together.
+ */
+export function runCapUsd(task) {
+  return Number(task.budgetUsd.toFixed(2));
 }
 
 function positiveNumber(value, field, task) {
@@ -199,6 +208,9 @@ export function loadTaskSet(file) {
     }
     const merged = { ...base, ...pick(task, TASK_FIELDS), name, prompt: task.prompt, cwd };
     positiveNumber(merged.budgetUsd, "budgetUsd", name);
+    if (runCapUsd(merged) <= 0) {
+      throw new Error(`task "${name}": budgetUsd must be at least 0.01, because the cap of a run is sent in whole cents`);
+    }
     positiveNumber(merged.timeoutS, "timeoutS", name);
     if (typeof merged.model !== "string" || merged.model === "") {
       throw new Error(`task "${name}": "model" must be a model name`);
@@ -211,6 +223,9 @@ export function loadTaskSet(file) {
     }
     if (typeof merged.history !== "boolean") {
       throw new Error(`task "${name}": "history" must be true or false`);
+    }
+    if (typeof merged.trace !== "boolean") {
+      throw new Error(`task "${name}": "trace" must be true or false`);
     }
     if (merged.history && !merged.export) throw new Error(`task "${name}": history requires export: true`);
     if (merged.history) checkHistoryRoot(cwd, name);
@@ -237,7 +252,9 @@ export function buildInvocation(task, armName, { claudeBin = "claude", pluginDir
     "-p",
     task.prompt,
     "--output-format",
-    "json",
+    // With "trace" the run prints one JSON line per message, so the record can
+    // say which skills and agents the session called. That format needs --verbose.
+    ...(task.trace ? ["stream-json", "--verbose"] : ["json"]),
     "--model",
     task.model,
     "--setting-sources",
@@ -246,7 +263,7 @@ export function buildInvocation(task, armName, { claudeBin = "claude", pluginDir
     "dontAsk",
     "--no-session-persistence",
     "--max-budget-usd",
-    task.budgetUsd.toFixed(2),
+    runCapUsd(task).toFixed(2),
     "--allowedTools",
     task.allowedTools.join(",")
   ];
@@ -428,26 +445,64 @@ export function runOne(invocation, { timeoutMs, maxOutputBytes = 8 * 1024 * 1024
 }
 
 // The one JSON object that `--output-format json` prints. Falls back to the
-// last JSON line when something else was printed before it.
+// last JSON line when something else was printed before it. In the stream
+// format every line has a "type", and only the line of type "result" counts:
+// a run that was stopped before its result line has no result.
 export function parseResult(stdout) {
   const text = stdout.trim();
   if (text === "") {
     return null;
   }
+  const isResult = (parsed) => parsed && typeof parsed === "object" && (parsed.type === undefined || parsed.type === "result");
   try {
     const parsed = JSON.parse(text);
-    return parsed && typeof parsed === "object" ? parsed : null;
+    return isResult(parsed) ? parsed : null;
   } catch {
     const lines = text.split("\n").filter((line) => line.startsWith("{"));
     for (let index = lines.length - 1; index >= 0; index -= 1) {
       try {
-        return JSON.parse(lines[index]);
+        const parsed = JSON.parse(lines[index]);
+        if (isResult(parsed)) {
+          return parsed;
+        }
       } catch {
         // Not this line.
       }
     }
     return null;
   }
+}
+
+// The tool calls of a run that printed the stream format: how often each tool
+// was called, which skills were loaded and which agents were started. `main`
+// is false for a call that a subagent made. Returns null when the output holds
+// no message line, so "no trace" and "no tool call" stay different answers.
+export function readTrace(stdout) {
+  const trace = { tools: {}, skills: [], agents: [] };
+  let messages = 0;
+  for (const line of String(stdout ?? "").split("\n")) {
+    if (!line.startsWith("{")) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!event || event.type !== "assistant" || !Array.isArray(event.message?.content)) continue;
+    messages += 1;
+    const main = event.parent_tool_use_id === null || event.parent_tool_use_id === undefined;
+    for (const block of event.message.content) {
+      if (!block || block.type !== "tool_use" || typeof block.name !== "string") continue;
+      trace.tools[block.name] = (trace.tools[block.name] ?? 0) + 1;
+      const input = block.input && typeof block.input === "object" ? block.input : {};
+      if (block.name === "Skill") {
+        trace.skills.push({ skill: typeof input.skill === "string" ? input.skill : null, main });
+      } else if (block.name === "Agent" || block.name === "Task") {
+        trace.agents.push({ agent: typeof input.subagent_type === "string" ? input.subagent_type : null, model: typeof input.model === "string" ? input.model : null, main });
+      }
+    }
+  }
+  return messages === 0 ? null : trace;
 }
 
 // The dispatches that the plugin's hook logged during one run, with the model
@@ -579,6 +634,22 @@ function cacheTokens(modelUsage) {
   return { cache_read, cache_created };
 }
 
+// The tokens of a run, or null when it reported none: input, output and cache
+// writes, over all models and with no price weight. Cache reads stay out, because
+// they count the same context again on each turn and would hide the rest.
+function runTokens(modelUsage) {
+  let total = null;
+  for (const usage of Object.values(modelUsage ?? {})) {
+    for (const field of ["inputTokens", "outputTokens", "cacheCreationInputTokens"]) {
+      const value = number(usage?.[field]);
+      if (value !== null) {
+        total = (total ?? 0) + value;
+      }
+    }
+  }
+  return total;
+}
+
 // One line of runs.jsonl. The answer is kept, cut to `resultChars`, because a
 // later grader needs it. The summary never prints it.
 export function makeRecord({ task, arm, run, invocation, outcome, dataDir, resultChars = 4000 }) {
@@ -606,10 +677,15 @@ export function makeRecord({ task, arm, run, invocation, outcome, dataDir, resul
     ...cacheTokens(result?.modelUsage),
     permission_denials: Array.isArray(result?.permission_denials) ? result.permission_denials.length : 0,
     dispatches: readDispatches(dataDir),
+    ...(task.trace ? { trace: readTrace(outcome.stdout) } : {}),
     result_chars: answer === null ? 0 : answer.length,
     result: answer === null ? null : answer.slice(0, resultChars),
     stderr_tail: isError || outcome.timedOut ? outcome.stderr.slice(-STDERR_TAIL) : ""
   };
+}
+
+function countKnown(values) {
+  return values.filter((value) => typeof value === "number").length;
 }
 
 function mean(values) {
@@ -655,7 +731,7 @@ export function summarize(records, taskList = []) {
     }
     const task = tasks.get(record.task);
     if (!task.has(record.arm)) {
-      task.set(record.arm, { runs: 0, errors: 0, timeouts: 0, costs: [], walls: [], turns: [], created: [], models: new Set(), routes: {}, graded: 0, passed: 0, failedGraders: {} });
+      task.set(record.arm, { runs: 0, errors: 0, timeouts: 0, costs: [], walls: [], turns: [], created: [], models: new Set(), routes: {}, graded: 0, passed: 0, failedGraders: {}, accuracyGraded: 0, accuracyPassed: 0, routeFailed: 0, tokens: [] });
     }
     const arm = task.get(record.arm);
     const grade = gradeRecord(record, byName.get(record.task));
@@ -668,6 +744,15 @@ export function summarize(records, taskList = []) {
         }
       }
     }
+    // Accuracy comes from every grader except the route grader, which only one arm
+    // gets. A wrong route counts on its own, also when the answer was not graded.
+    const answerGraders = grade.graders.filter((grader) => grader.name !== "route");
+    if (grade.pass !== null && answerGraders.length > 0) {
+      arm.accuracyGraded += 1;
+      arm.accuracyPassed += answerGraders.every((grader) => grader.pass) ? 1 : 0;
+    }
+    arm.routeFailed += grade.graders.some((grader) => grader.name === "route" && !grader.pass) ? 1 : 0;
+    arm.tokens.push(runTokens(record.model_usage));
     arm.runs += 1;
     arm.errors += record.is_error ? 1 : 0;
     arm.timeouts += record.timed_out ? 1 : 0;
@@ -698,6 +783,15 @@ export function summarize(records, taskList = []) {
         cost_mean_usd: mean(data.costs),
         cost_stderr_usd: standardError(data.costs),
         wall_mean_ms: mean(data.walls),
+        wall_stderr_ms: standardError(data.walls),
+        wall_known: countKnown(data.walls),
+        tokens_mean: mean(data.tokens),
+        tokens_stderr: standardError(data.tokens),
+        tokens_known: countKnown(data.tokens),
+        accuracy_graded: data.accuracyGraded,
+        accuracy_passed: data.accuracyPassed,
+        accuracy: data.accuracyGraded === 0 ? null : data.accuracyPassed / data.accuracyGraded,
+        route_failed: data.routeFailed,
         turns_mean: mean(data.turns),
         cache_created_mean: mean(data.created),
         graded: data.graded,
@@ -712,13 +806,15 @@ export function summarize(records, taskList = []) {
   return out;
 }
 
-// The pass rule: the routing arm must cost less than the
-// all-Sonnet baseline at the same pass rate, and every route must be the one the
-// task expects. The two guards before it come from the first real run: too few
-// runs, or arms that wrote very different amounts into the prompt cache, make a
-// cost difference meaningless, and the verdict is then "not decided".
+// The pass rule: accuracy first, then tokens, then time. Each later step only
+// counts when the earlier one did not decide. Too few runs make a difference
+// meaningless, and arms that wrote very different amounts into the prompt cache
+// cannot be compared on tokens.
 export const MIN_RUNS_PER_ARM = 3;
 export const MAX_CACHE_RATIO = 2;
+// Tokens or time count as the same when the whole gap, with its uncertainty, stays
+// inside this share of the baseline. Fixed in advance, so a result cannot move it.
+export const SAME_SHARE = 0.1;
 
 // How many times more one arm wrote into the prompt cache than the other, or
 // null when that is unknown. One arm at zero against a positive one is the
@@ -747,10 +843,9 @@ function costGap(a, b) {
 }
 
 // The jev arm against each effort baseline that ran. This is information, not
-// the pass rule: the rule compares jev with the sonnet arm, and changing it is
-// the user's decision. It answers one question: does a plain session at lower
-// effort reach the same pass rate for less than the routing does? The same
-// guards as the pass rule apply, and a guard that fires means "not compared".
+// the pass rule, and it judges cost where the rule judges tokens. It answers one
+// question: does a plain session at lower effort reach the same pass rate for
+// less than the routing does? A guard that fires means "not compared".
 export function compareEffortBaselines(summary, { minRuns = MIN_RUNS_PER_ARM, maxCacheRatio = MAX_CACHE_RATIO } = {}) {
   const out = {};
   for (const [taskName, arms] of Object.entries(summary.tasks)) {
@@ -795,6 +890,33 @@ export function compareEffortBaselines(summary, { minRuns = MIN_RUNS_PER_ARM, ma
   return out;
 }
 
+// The 95 percent Wilson range of a pass rate. It stays honest at few runs: 3 of 3
+// still reaches down to about 44 percent.
+function wilsonRange(passed, total) {
+  const z = 1.96;
+  const rate = passed / total;
+  const divisor = 1 + (z * z) / total;
+  const centre = rate + (z * z) / (2 * total);
+  const spread = z * Math.sqrt((rate * (1 - rate)) / total + (z * z) / (4 * total * total));
+  return { low: Math.max(0, (centre - spread) / divisor), high: Math.min(1, (centre + spread) / divisor) };
+}
+
+// One number of the jev arm against the same number of the baseline. "same" needs
+// the whole uncertainty inside the margin: a gap that is only small is "unclear",
+// because few noisy runs cannot show that two arms are equal.
+function compareMetric(arm, baseline, minRuns) {
+  if (arm.mean === null || baseline.mean === null || arm.known < minRuns || baseline.known < minRuns) {
+    return "unknown";
+  }
+  const gap = arm.mean - baseline.mean;
+  const noise = 2 * Math.sqrt((arm.stderr ?? 0) ** 2 + (baseline.stderr ?? 0) ** 2);
+  const margin = SAME_SHARE * baseline.mean;
+  if (Math.abs(gap) > Math.max(noise, margin)) {
+    return gap < 0 ? "lower" : "higher";
+  }
+  return Math.abs(gap) + noise <= margin ? "same" : "unclear";
+}
+
 export function checkPassRule(summary, { minRuns = MIN_RUNS_PER_ARM, maxCacheRatio = MAX_CACHE_RATIO } = {}) {
   const out = {};
   for (const [taskName, arms] of Object.entries(summary.tasks)) {
@@ -811,38 +933,40 @@ export function checkPassRule(summary, { minRuns = MIN_RUNS_PER_ARM, maxCacheRat
     // errored or timed-out run fails there. The summary does not say which kind
     // of task it holds, so the reason names both.
     const blockers = [];
-    if (jev.graded < minRuns || baseline.graded < minRuns) {
+    // A summary saved before the accuracy fields existed would compare as
+    // `undefined`, which passes both guards below and prints NaN ranges.
+    const counted = (arm) => Number.isInteger(arm.accuracy_graded) && Number.isInteger(arm.accuracy_passed) && arm.accuracy_passed >= 0 && arm.accuracy_passed <= arm.accuracy_graded;
+    if (!counted(jev) || !counted(baseline)) {
+      out[taskName] = { verdict: "NOT DECIDED", reasons: ["the summary has no usable accuracy counts; build it again from the saved runs with --regrade"] };
+      continue;
+    }
+    if (jev.accuracy_graded < minRuns || baseline.accuracy_graded < minRuns) {
       blockers.push(
-        `fewer than ${minRuns} graded runs per arm (jev ${jev.graded} of ${jev.runs}, sonnet ${baseline.graded} of ${baseline.runs}); a task without \`verify\` does not grade a run that errored, timed out or was cut off; a task with \`verify\` grades every run, and an errored or timed-out run fails`
+        `fewer than ${minRuns} graded runs per arm (jev ${jev.accuracy_graded} of ${jev.runs}, sonnet ${baseline.accuracy_graded} of ${baseline.runs}); a task without \`verify\` does not grade a run that errored, timed out or was cut off; a task with \`verify\` grades every run, and an errored or timed-out run fails`
       );
     }
-    const ratio = cacheRatio(jev.cache_created_mean, baseline.cache_created_mean);
-    if (ratio !== null && ratio > maxCacheRatio) {
-      blockers.push(`the arms wrote very different amounts into the prompt cache (${cacheReason(ratio)}), so the cost cannot be compared`);
-    }
-    if (jev.pass_rate === null || baseline.pass_rate === null) {
-      blockers.push("no grader ran, so there is no pass rate");
-    }
-    if (jev.cost_mean_usd === null || baseline.cost_mean_usd === null) {
-      blockers.push("a run reported no cost");
+    if (jev.accuracy === null || baseline.accuracy === null) {
+      blockers.push("no answer grader ran, so there is no accuracy");
     }
     if (blockers.length > 0) {
       out[taskName] = { verdict: "NOT DECIDED", reasons: blockers };
       continue;
     }
-    // A wrong answer or a wrong route is a failure whatever the cost did.
+
+    // Step 1, accuracy. Few runs cannot show that two arms are equal, so this step
+    // is one-sided: a loss that was seen fails, and no loss seen goes on with the
+    // ranges printed. A wrong route or more broken runs fail here too.
     const reasons = [];
-    if (jev.pass_rate < baseline.pass_rate) {
-      reasons.push(`the jev arm answers worse than the baseline (${(jev.pass_rate * 100).toFixed(0)}% against ${(baseline.pass_rate * 100).toFixed(0)}%)`);
+    if (jev.accuracy < baseline.accuracy) {
+      reasons.push(`the jev arm answers worse than the baseline (${(jev.accuracy * 100).toFixed(0)}% against ${(baseline.accuracy * 100).toFixed(0)}%)`);
     }
-    if ((jev.failed_graders.route ?? 0) > 0) {
-      reasons.push(`the route was not the expected one in ${jev.failed_graders.route} of ${jev.graded} graded runs`);
+    if (jev.route_failed > 0) {
+      reasons.push(`the route was not the expected one in ${jev.route_failed} of ${jev.runs} runs`);
     }
-    // An arm that falls over more often than the baseline is worse, whatever it
-    // costs. A cheaper arm that fails half its runs is not a cheaper arm.
-    // Compared as shares, not as counts. The arms need not have the same number
-    // of runs: one that stopped early, or a rerun of a single arm, gives them
-    // different totals, and 1 failure in 3 is worse than 2 in 20 although the
+    // An arm that falls over more often than the baseline is worse, whatever else
+    // it does. Compared as shares, not as counts. The arms need not have the same
+    // number of runs: one that stopped early, or a rerun of a single arm, gives
+    // them different totals, and 1 failure in 3 is worse than 2 in 20 although the
     // count is smaller.
     const broke = (arm) => arm.errors + arm.timeouts;
     const brokeShare = (arm) => (arm.runs === 0 ? 0 : broke(arm) / arm.runs);
@@ -855,23 +979,72 @@ export function checkPassRule(summary, { minRuns = MIN_RUNS_PER_ARM, maxCacheRat
       out[taskName] = { verdict: "FAIL", reasons };
       continue;
     }
-    // The cost is compared only when the gap between the two arms is wider than
-    // the uncertainty of that gap. Without this the rule reads noise as a verdict.
-    const { gap, margin } = costGap(jev, baseline);
-    if (gap < margin) {
-      out[taskName] = {
-        verdict: "NOT DECIDED",
-        reasons: [
-          `the two arms are ${money(gap)} apart and the runs are uncertain by ${money(margin)}, so the cost cannot be told apart from noise (jev ${money(jev.cost_mean_usd)}, sonnet ${money(baseline.cost_mean_usd)}); more runs would narrow this`
-        ]
-      };
+    const jevRange = wilsonRange(jev.accuracy_passed, jev.accuracy_graded);
+    const baseRange = wilsonRange(baseline.accuracy_passed, baseline.accuracy_graded);
+    const percent = (value) => `${(value * 100).toFixed(0)}%`;
+    const accuracyLine = `accuracy: jev ${jev.accuracy_passed} of ${jev.accuracy_graded} (range ${percent(jevRange.low)} to ${percent(jevRange.high)}), sonnet ${baseline.accuracy_passed} of ${baseline.accuracy_graded} (range ${percent(baseRange.low)} to ${percent(baseRange.high)})`;
+    if (jev.accuracy === 0 && baseline.accuracy === 0) {
+      out[taskName] = { verdict: "NOT DECIDED", reasons: ["neither arm answered right, so nothing here can favour one of them", accuracyLine] };
       continue;
     }
-    out[taskName] = jev.cost_mean_usd < baseline.cost_mean_usd
-      ? { verdict: "PASS", reasons: [`${money(jev.cost_mean_usd)} against ${money(baseline.cost_mean_usd)}, a gap of ${money(gap)} against an uncertainty of ${money(margin)}, at ${(jev.pass_rate * 100).toFixed(0)}% against ${(baseline.pass_rate * 100).toFixed(0)}%, every route as expected`] }
-      : { verdict: "FAIL", reasons: [`the jev arm costs more than the baseline (${money(jev.cost_mean_usd)} against ${money(baseline.cost_mean_usd)}, a gap of ${money(gap)} wider than the ${money(margin)} uncertainty)`] };
+    // Only ranges that do not overlap count as a win, and a win passes whatever the
+    // tokens do. This is how a correct move to a larger model can pass.
+    if (jevRange.low > baseRange.high) {
+      out[taskName] = { verdict: "PASS", reasons: ["the jev arm is clearly more accurate", accuracyLine] };
+      continue;
+    }
+    // A higher rate that is no clear win cannot fail on tokens or time, and cannot
+    // pass on them either when they went the wrong way.
+    const higher = jev.accuracy > baseline.accuracy;
+    const seen = higher ? `higher accuracy, not a clear win; ${accuracyLine}` : `no accuracy loss seen; ${accuracyLine}`;
+    const worse = (what, line) =>
+      higher
+        ? { verdict: "NOT DECIDED", reasons: [`the jev arm is more accurate, not clearly, and uses more ${what} (${line})`, seen] }
+        : { verdict: "FAIL", reasons: [`the jev arm uses more ${what} than the baseline (${line})`, seen] };
+
+    // Step 2, tokens.
+    const ratio = cacheRatio(jev.cache_created_mean, baseline.cache_created_mean);
+    if (ratio !== null && ratio > maxCacheRatio) {
+      out[taskName] = { verdict: "NOT DECIDED", reasons: [`the arms wrote very different amounts into the prompt cache (${cacheReason(ratio)}), so the tokens cannot be compared`, seen] };
+      continue;
+    }
+    const metric = (arm, kind) =>
+      kind === "tokens"
+        ? { mean: arm.tokens_mean ?? null, stderr: arm.tokens_stderr ?? null, known: arm.tokens_known ?? 0 }
+        : { mean: arm.wall_mean_ms ?? null, stderr: arm.wall_stderr_ms ?? null, known: arm.wall_known ?? 0 };
+    const tokenLine = `jev ${count(jev.tokens_mean)}, sonnet ${count(baseline.tokens_mean)} tokens`;
+    const tokens = compareMetric(metric(jev, "tokens"), metric(baseline, "tokens"), minRuns);
+    if (tokens === "unknown") {
+      out[taskName] = { verdict: "NOT DECIDED", reasons: [`too few runs reported tokens (jev ${jev.tokens_known ?? 0}, sonnet ${baseline.tokens_known ?? 0})`, seen] };
+    } else if (tokens === "unclear") {
+      out[taskName] = { verdict: "NOT DECIDED", reasons: [`the tokens cannot be told apart from noise (${tokenLine})`, seen] };
+    } else if (tokens === "lower") {
+      out[taskName] = { verdict: "PASS", reasons: [`the jev arm uses fewer tokens (${tokenLine})`, seen] };
+    } else if (tokens === "higher") {
+      out[taskName] = worse("tokens", tokenLine);
+    } else {
+      // Step 3, time, only when the tokens are the same.
+      const timeLine = `jev ${seconds(jev.wall_mean_ms ?? null)}, sonnet ${seconds(baseline.wall_mean_ms ?? null)}`;
+      const time = compareMetric(metric(jev, "time"), metric(baseline, "time"), minRuns);
+      if (time === "lower") {
+        out[taskName] = { verdict: "PASS", reasons: [`the same tokens, and the jev arm is faster (${timeLine})`, seen] };
+      } else if (time === "higher") {
+        out[taskName] = worse("time", timeLine);
+      } else {
+        const why = {
+          same: "the arms show no difference in tokens or time",
+          unclear: "the tokens are the same, and the time cannot be told apart from noise",
+          unknown: `the tokens are the same, and too few runs reported a time (jev ${jev.wall_known ?? 0}, sonnet ${baseline.wall_known ?? 0})`
+        }[time];
+        out[taskName] = { verdict: "NOT DECIDED", reasons: [`${why} (${tokenLine}; ${timeLine})`, seen] };
+      }
+    }
   }
   return out;
+}
+
+function count(value) {
+  return value === null || value === undefined ? "-" : Math.round(value).toLocaleString("en-US");
 }
 
 function money(value) {
@@ -898,6 +1071,7 @@ export function renderSummary(summary) {
         `  ${arm.padEnd(8)} ${String(data.runs).padEnd(5)} ${String(data.errors).padEnd(7)} ${String(data.timeouts).padEnd(9)} ${pass.padEnd(9)} ${money(data.cost_mean_usd).padEnd(10)} ${seconds(data.wall_mean_ms).padEnd(10)} ${turns.padEnd(6)} ${created.padEnd(10)} ${data.models.join(", ") || "-"}`
       );
     }
+    lines.push(`  tokens mean (input, output, cache writes): ${Object.entries(arms).map(([arm, data]) => `${arm} ${count(data.tokens_mean)}`).join(", ")}`);
     for (const [arm, data] of Object.entries(arms)) {
       const failed = Object.entries(data.failed_graders);
       if (failed.length > 0) {
@@ -942,7 +1116,7 @@ export function renderSummary(summary) {
 // The plan that the command prints before it spends anything.
 export function renderPlan(taskSet, arms, runs, { outDir, maxTotalUsd }) {
   const total = taskSet.tasks.length * arms.length * runs;
-  const cap = taskSet.tasks.reduce((sum, task) => sum + task.budgetUsd * arms.length * runs, 0);
+  const cap = taskSet.tasks.reduce((sum, task) => sum + runCapUsd(task) * arms.length * runs, 0);
   const lines = [
     `Plan: ${taskSet.tasks.length} tasks x ${arms.length} arms x ${runs} runs = ${total} runs of claude -p, each capped by its own budget`,
     `Most that the run caps allow: ${money(cap)}${maxTotalUsd === null ? "" : `; the runner stops after ${money(maxTotalUsd)}`}`,

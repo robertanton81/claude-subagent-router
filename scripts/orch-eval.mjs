@@ -40,6 +40,7 @@ import {
   renderPlan,
   renderSummary,
   rotateArms,
+  runCapUsd,
   runOne,
   summarize
 } from "./lib/eval.mjs";
@@ -203,13 +204,18 @@ async function main() {
   // give later arms a different starting tree.
   const revisions = new Map(taskSet.tasks.filter((task) => task.export).map((task) =>
     [task.name, execFileSync("git", ["-C", task.cwd, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()]));
-  let spent = 0;
+  // Whole millionths of a dollar: a sum of float dollars can stay just under
+  // the limit (0.1 + 0.7 is below 0.8) and let one more run start.
+  // A cost is rounded up, so finer digits never make the sum too small.
+  const MICRO_PER_USD = 1_000_000;
+  const limitMicroUsd = maxTotalUsd === null ? null : Math.round(maxTotalUsd * MICRO_PER_USD);
+  let spentMicroUsd = 0;
   let stoppedByCap = false;
 
   for (const task of taskSet.tasks) {
     for (let run = 1; run <= runs && !stoppedByCap; run += 1) {
       for (const arm of rotateArms(arms, run)) {
-        if (maxTotalUsd !== null && spent >= maxTotalUsd) {
+        if (limitMicroUsd !== null && spentMicroUsd >= limitMicroUsd) {
           stoppedByCap = true;
           break;
         }
@@ -227,14 +233,17 @@ async function main() {
         }) : null;
         const execution = verification ? boundWorker(invocation, verification) : invocation;
         process.stderr.write(`${task.name} / ${arm} / run ${run}: started\n`);
-        const outcome = await runOne(execution, { timeoutMs: task.timeoutS * 1000 });
+        // A traced run prints every message, so it gets a higher output limit.
+        const outcome = await runOne(execution, { timeoutMs: task.timeoutS * 1000, ...(task.trace ? { maxOutputBytes: 64 * 1024 * 1024 } : {}) });
         const record = makeRecord({ task, arm, run, invocation, outcome, dataDir: runData, resultChars });
         if (revisions.has(task.name)) record.source_revision = revisions.get(task.name);
         if (verification) record.verification = await verifyWorkspace(task, cwd, verification, runOne);
         records.push(record);
         fs.appendFileSync(runsFile, `${JSON.stringify(record)}\n`, { mode: 0o600 });
         makeFilePrivate(runsFile);
-        spent += record.cost_usd ?? 0;
+        // A run that reported no cost (a timeout, a crash) still used the plan.
+        // Against the total limit it counts at the cap that Claude got, the most it can have cost.
+        spentMicroUsd += Math.ceil((record.cost_usd ?? runCapUsd(task)) * MICRO_PER_USD);
         const state = record.timed_out ? "timeout" : record.is_error ? "error" : "ok";
         const cost = record.cost_usd === null ? "cost unknown" : `$${record.cost_usd.toFixed(3)}`;
         process.stderr.write(`${task.name} / ${arm} / run ${run}: ${state}, ${cost}, ${(record.wall_ms / 1000).toFixed(1)} s\n`);
@@ -250,7 +259,7 @@ async function main() {
   process.stdout.write(renderSummary(summary));
   process.stdout.write(`Records: ${runsFile}\n`);
   if (stoppedByCap) {
-    process.stderr.write(`orch-eval: stopped by --max-total-usd after $${spent.toFixed(3)}; the runs so far are saved\n`);
+    process.stderr.write(`orch-eval: stopped by --max-total-usd after $${(spentMicroUsd / MICRO_PER_USD).toFixed(3)}; the runs so far are saved\n`);
     process.exitCode = 3;
   } else if (summary.errors > 0 || summary.timeouts > 0 || records.some((record) => record.verification && record.verification.status !== "passed")) {
     process.exitCode = 1;

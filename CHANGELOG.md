@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.2
+
+Workers:
+
+- **The three workers on Haiku name their effort level.** The searcher runs at `medium` and the two Codex workers at `low`. Before, they had no level. On current Claude Code versions they then ran at `medium`, the default of Haiku 5.5, and on an older version they could take a higher level from the session. The searcher does not change on current versions. A Codex worker only starts a Codex job and passes its result on, so `low` does not change what Codex does.
+
+Evaluation and report:
+
+- **The evaluation verdict now judges accuracy, then tokens, then time, with margins fixed in advance.** Before, it passed the cheaper arm, so a correct move to a larger model could not pass.
+- **The report lists the model ids that ran, so a new model behind an alias shows.**
+- **The evaluation runner has a task-set field `trace`.** With it, the record of a run says how often each tool was called, which skills the session loaded and which agents it started.
+- **Against `--max-total-usd`, a run that reported no cost now counts at its own budget.** Before, it counted as zero, so runs that timed out did not stop the command.
+
 ## 0.5.1
 
 Codex:

@@ -49,20 +49,22 @@ export const DEFAULT_MODEL = table({
 // `max` would run every worker at `max`. The implementer and the reviewer run at
 // `high`, one level above the `medium` default of Sonnet 5.5, and the debugger at
 // the default of Opus 5.5. The complete searcher runs Sonnet at `low`, because a
-// complete listing needs a careful reader more than long thinking. The Haiku workers
-// have no line (null), although Haiku 5.5 takes effort. The line stays when the hook
+// complete listing needs a careful reader more than long thinking. The searcher runs
+// at the `medium` default of Haiku 5.5. The two Codex workers run at `low`: each
+// only starts one command and passes its output on. Without a line, a worker on an
+// older Claude Code can take the session's level. The line stays when the hook
 // changes the model: an implementer moved to Opus runs at `high`, a debugger
 // capped at Sonnet runs at `medium`. The variable CLAUDE_CODE_EFFORT_LEVEL
 // overrides the line. Source: https://code.claude.com/docs/en/model-config,
 // checked 2026-11-03. Keep this in sync with the agent files.
 export const DEFAULT_EFFORT = table({
-  [WORKERS.searcher]: null,
+  [WORKERS.searcher]: "medium",
   [WORKERS.completeSearcher]: "low",
   [WORKERS.implementer]: "high",
   [WORKERS.debugger]: "medium",
   [WORKERS.reviewer]: "high",
-  [WORKERS.codexImplementer]: null,
-  [WORKERS.codexReviewer]: null
+  [WORKERS.codexImplementer]: "low",
+  [WORKERS.codexReviewer]: "low"
 });
 
 // Workers that change files, and the model family that writes the change.

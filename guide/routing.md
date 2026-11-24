@@ -114,8 +114,8 @@ A direct call to `implementer`, `debugger` or `reviewer` gets no such rule. So w
 Effort is how much the model thinks before it answers.
 
 - Each Claude worker sets its effort in its agent file. So the effort of your session does not carry over to the workers.
-- The implementer and the reviewer run at `high`, the debugger at `medium` and the complete searcher at `low`. The default of Opus 5.5, Sonnet 5.5 and Haiku 5.5 is `medium`.
-- The searcher sets no effort. On Claude Code 2.1.317 or later, when it runs on a different model from the session, it uses that model's saved level or its default. Otherwise it takes the session's level.
+- The implementer and the reviewer run at `high`, the debugger and the searcher at `medium`, and the complete searcher at `low`. The default of Opus 5.5, Sonnet 5.5 and Haiku 5.5 is `medium`.
+- The two Codex workers run at `low`. Each one only starts a Codex job and passes its result on, so this level does not change what Codex does.
 - The level stays when the hook changes the model. An implementer moved to Opus runs at `high`.
 - The variable `CLAUDE_CODE_EFFORT_LEVEL` overrides the level.
 - The Codex workers use the model and effort of `~/.codex/config.toml`, unless the brief has a `codex-model:` or `codex-effort:` line.

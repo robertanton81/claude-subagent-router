@@ -22,7 +22,7 @@ node scripts/orch-eval.mjs <task set.json> --arms off,sonnet,shadow,jev --runs 3
 
 ## Task sets
 
-A task set is a JSON file with a `tasks` list. Each task must set its own `name`, `prompt` and `cwd`. The file may also set defaults for all its tasks: `model`, `budgetUsd`, `timeoutS`, `allowedTools`, `export`, `history`, `expect`, `expectRoute` and `verify`.
+A task set is a JSON file with a `tasks` list. Each task must set its own `name`, `prompt` and `cwd`. The file may also set defaults for all its tasks: `model`, `budgetUsd`, `timeoutS`, `allowedTools`, `export`, `history`, `expect`, `expectRoute`, `verify` and `trace`.
 
 | Field | Meaning | Default |
 | :-- | :-- | :-- |
@@ -30,7 +30,7 @@ A task set is a JSON file with a `tasks` list. Each task must set its own `name`
 | `prompt` | What the main session is asked to do. | required |
 | `cwd` | The project folder, absolute or relative to the task-set file. | required |
 | `model` | The model of the main session. | `sonnet` |
-| `budgetUsd` | The cost cap of one run. | 1 |
+| `budgetUsd` | The cost cap of one run. It reaches Claude rounded to whole cents, so it must be at least 0.01. | 1 |
 | `timeoutS` | The time limit of one run, in seconds. | 600 |
 | `allowedTools` | The tools the main session may use. | `Read`, `Glob`, `Grep`, `Agent` |
 | `export` | Run in a fresh copy of the last commit. Use it for a task that writes files. | off |
@@ -38,6 +38,7 @@ A task set is a JSON file with a `tasks` list. Each task must set its own `name`
 | `expect` | The text grader. See [Graders](#graders). | none |
 | `expectRoute` | The route grader. See [Graders](#graders). | none |
 | `verify` | The executable grader. See [Executable graders](#executable-graders). | none |
+| `trace` | The run prints one line per message (`--output-format stream-json`), and its record gets a `trace` field: how often each tool was called, which skills were loaded and which agents were started. Each skill and agent entry has `main`, which is false for a call that a subagent made. The field is `null` when the output holds no message line, which is not the same as a run with no tool call. Use it when a result depends on which skill a session loaded. | off |
 
 ## Graders
 
@@ -62,7 +63,7 @@ node scripts/orch-eval.mjs <task set.json> --regrade ~/.claude/orchestrator/eval
 | Arm | Setup |
 | :-- | :-- |
 | `off` | Claude Code without the plugin. |
-| `sonnet` | Without the plugin, with every subagent forced to Sonnet. The `jev` arm must cost less than this arm. |
+| `sonnet` | Without the plugin, with every subagent forced to Sonnet. The pass rule compares the `jev` arm with this arm. |
 | `shadow` | The plugin in `shadow` mode. Its workers and skills exist, and the hook changes nothing. |
 | `jev` | The plugin in `enforce` mode. |
 | `low`, `medium` | Without the plugin, with the whole session at that effort. These run only when `--arms` names them. |
@@ -77,31 +78,34 @@ node scripts/orch-eval.mjs <task set.json> --regrade ~/.claude/orchestrator/eval
 
 ## The pass rule
 
-At the end, the runner gives each task a verdict: `PASS`, `FAIL` or `NOT DECIDED`. The `jev` arm passes when two things are true. It costs less than the `sonnet` baseline, at the same pass rate or a higher one. And every route that it took was the expected one.
+At the end, the runner gives each task a verdict: `PASS`, `FAIL` or `NOT DECIDED`. It compares the `jev` arm with the `sonnet` baseline in a fixed order: accuracy, then tokens, then time. A later step counts only when the earlier one did not decide.
 
-The runner checks in this order.
+**Accuracy** is the pass rate of the answer and executable graders. The route grader is a separate check, because only the `jev` arm gets it. **Tokens** are input, output and cache writes over all models, with no price weight. Cache reads stay out, because they count the same context again on each turn. **Time** is the clock time of the whole run, so the delay of the hook and of Jev counts.
 
 **1. The verdict is `NOT DECIDED` when:**
 
 - the run lacks the `jev` arm or the `sonnet` arm;
 - an arm has fewer than three graded runs. In a task without `verify`, a run that errored, timed out or was cut off is not graded. In a task with `verify`, every run is graded: a run that errored or timed out counts as a failure, and a cut-off answer fails when the task also has `expect`;
-- the two arms wrote very different amounts into the prompt cache (a factor above two);
-- one of the two arms has no graded run, so it has no pass rate. `expectRoute` never grades the `sonnet` arm, so a task whose only grader is `expectRoute` always ends `NOT DECIDED`. Add `expect` or `verify` to get a verdict;
-- no run of the `jev` arm, or no run of the `sonnet` arm, reported a cost. A run without a cost is left out of its arm's mean cost.
+- no answer grader ran, so there is no accuracy. A task whose only grader is `expectRoute` always ends here. Add `expect` or `verify` to get a verdict.
 
-**2. The verdict is `FAIL`,** whatever the costs, when:
+**2. Accuracy decides when it can.** Three to five runs cannot show that two arms are equal: 3 of 3 passes still has a 95 percent range of about 44 to 100 percent. So this step is one-sided.
 
-- the `jev` arm has a lower pass rate than the `sonnet` arm;
-- a route was not the expected one;
-- the `jev` arm errored or timed out in a larger share of its runs than the `sonnet` arm.
+- The verdict is `FAIL` when the `jev` arm has a lower accuracy, when a route was not the expected one, or when the `jev` arm errored or timed out in a larger share of its runs.
+- The verdict is `NOT DECIDED` when none of these failures was seen and neither arm answered right, so nothing can favour one of them.
+- The verdict is `PASS` when the `jev` arm is clearly more accurate: the 95 percent Wilson ranges of the two arms do not overlap. So 5 of 5 against 0 of 5 wins, and 3 of 3 against 0 of 3 does not. This is how a correct move to a larger model can pass, whatever it costs.
+- Otherwise the runner prints both ranges and goes on. A later `PASS` then means "no loss seen", not "equally accurate".
 
-**3. The verdict is `NOT DECIDED`** when the cost gap between the two arms is narrower than the uncertainty of that gap (twice its standard error). The standard error gets smaller as you add runs, so more runs make a `PASS` or a `FAIL` more likely.
+**3. Tokens, then time.** Each compares the means of the two arms. Both use the same margin, fixed in advance: 10 percent of the baseline.
 
-**4. Otherwise** the verdict is `PASS` when the `jev` arm costs less, and `FAIL` when it costs more.
+- A gap wider than the margin and wider than the uncertainty of the gap (twice its standard error) is a real difference. Fewer tokens or less time gives `PASS`. More gives `FAIL`, or `NOT DECIDED` when the `jev` arm had a higher accuracy that was no clear win.
+- When the whole gap, with its uncertainty, stays inside the margin, the two arms count as the same, and the next step decides. Same tokens and same time end `NOT DECIDED`.
+- Anything else is noise, and the verdict is `NOT DECIDED`. Time does not decide in place of tokens that are unclear.
 
-A cost difference under the conditions of step 1 or step 3 is noise, not a result.
+**Tokens also end `NOT DECIDED` when** fewer than three runs of an arm reported them, or when the two arms wrote very different amounts into the prompt cache (a factor above two). The same run count holds for time: when the tokens are the same and fewer than three runs of an arm reported a time, the verdict is `NOT DECIDED` and says so. Neither guard hides an accuracy result.
 
-When `low` or `medium` ran next to `jev`, the summary also compares `jev` with each of them, under the same conditions. This comparison is not part of the pass rule. It tells you whether a plain session at a lower effort reaches the same pass rate for less money than the routing.
+The cost in dollars stays in the summary, but it is not part of the verdict. The goal is the most relevant model for a task, and a rule that passes the cheaper arm cannot pass a correct move to a larger model.
+
+When `low` or `medium` ran next to `jev`, the summary also compares the cost of `jev` with each of them, under the run-count and cache guards above. This comparison is not part of the pass rule. It tells you whether a plain session at a lower effort reaches the same pass rate for less money than the routing.
 
 Read the column "cache new" before the cost. A run that wrote many tokens into the prompt cache costs more for that reason alone, whatever the route did.
 
@@ -126,7 +130,7 @@ Exit codes:
 | 0 | Every run finished, and every executable grader passed. A `FAIL` verdict still gives 0. |
 | 1 | An error or a timeout in some run, a failed executable evaluation, or an error of the runner itself, for example a missing sandbox or a results folder that is not empty. |
 | 2 | The arguments or the task set are not valid, for example a `cwd` that does not exist. Nothing was started. |
-| 3 | `--max-total-usd` stopped the command. |
+| 3 | `--max-total-usd` stopped the command. The limit is checked between two runs. A run that reported no cost, for example after a timeout, counts at its own `budgetUsd`, in the whole cents that the run got as its cap. |
 
 ## Executable graders
 

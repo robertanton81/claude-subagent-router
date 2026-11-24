@@ -382,6 +382,26 @@ export function buildReport(store, options = {}) {
     }
   }
 
+  // -- Which model ids really ran --
+  // An alias such as `sonnet` can move to a new model with no notice, and the
+  // `launched` record is where that shows. Workflow agents have no such record.
+  const modelIds = new Map();
+  for (const record of log) {
+    if (record.event !== "launched" || typeof record.resolved_model !== "string") {
+      continue;
+    }
+    const ms = timeOf(record);
+    const day = ms === null ? null : new Date(ms).toISOString().slice(0, 10);
+    const entry = modelIds.get(record.resolved_model) ?? { model: record.resolved_model, runs: 0, first: null, last: null };
+    entry.runs += 1;
+    if (day !== null) {
+      entry.first = entry.first === null || day < entry.first ? day : entry.first;
+      entry.last = entry.last === null || day > entry.last ? day : entry.last;
+    }
+    modelIds.set(record.resolved_model, entry);
+  }
+  const modelsThatRan = [...modelIds.values()].sort((a, b) => (a.first ?? "").localeCompare(b.first ?? "") || a.model.localeCompare(b.model));
+
   // -- Links between the records of one worker run --
   const agentOfToolUse = new Map();
   const toolUseOfAgent = new Map();
@@ -639,6 +659,7 @@ export function buildReport(store, options = {}) {
       ruleWouldFire,
       ruleWouldFireByReason,
       explicitModel,
+      modelsThatRan,
       notices: { count: notices, byKind: noticesByKind },
       claudeTightAtDispatch
     },
@@ -708,6 +729,8 @@ export function renderText(report) {
   lines.push(`  Effort named by the orchestrator: ${pairs(levels.named)}. The effort table only watches, and would propose: ${pairs(levels.proposed)}; no proposal: ${pairs(levels.noProposal)}. Against the worker's file: ${pairs(levels.againstWorkerFile)}`);
   const named = dispatches.explicitModel;
   lines.push(`  Model named by the orchestrator: ${named.named} dispatches, overridden ${named.overridden} (down ${named.down}, up ${named.up}): ${pairs(named.byChange)}. In shadow mode it would have overridden ${named.wouldOverride}. Moved to Codex ${named.toCodex}, from Codex ${named.fromCodex}, would have moved to Codex ${named.wouldMoveToCodex}`);
+  const ran = dispatches.modelsThatRan.map((entry) => `${entry.model} ${entry.runs} (${entry.first ?? "?"} to ${entry.last ?? "?"})`);
+  lines.push(`  Model ids that ran, not counting Workflow agents: ${ran.join(", ") || "none"}`);
   lines.push(`  Notices shown: ${dispatches.notices.count}: ${pairs(dispatches.notices.byKind)}`);
   lines.push(`  Claude tight at dispatch time: gate ${dispatches.claudeTightAtDispatch.gate}, pace ${dispatches.claudeTightAtDispatch.pace}, no ${dispatches.claudeTightAtDispatch.no}, unknown ${dispatches.claudeTightAtDispatch.unknown}`);
   lines.push("");

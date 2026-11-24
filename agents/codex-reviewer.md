@@ -2,6 +2,7 @@
 name: codex-reviewer
 description: Runs a Codex code review on the ChatGPT plan. By default it reviews the uncommitted changes. A line "review-scope:" in the brief picks another scope - base:<branch>, commit:<hash> or custom. Use after a Claude worker or the main session changed code, because a reviewer from another model family finds different problems. It changes no files.
 model: haiku
+effort: low
 tools: Bash
 omitClaudeMd: true
 ---
